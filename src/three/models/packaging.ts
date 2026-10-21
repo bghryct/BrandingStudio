@@ -1,7 +1,9 @@
 /**
  * Pillow box, paper tube, stand-up pouch and jar.
  */
-import { CircleGeometry, Color, CylinderGeometry, DoubleSide, FrontSide, Group, MeshPhysicalMaterial, MeshStandardMaterial, type BufferGeometry } from 'three';
+import { CanvasTexture, CircleGeometry, Color, CylinderGeometry, DoubleSide, FrontSide, Group, MeshPhysicalMaterial, MeshStandardMaterial, NoColorSpace, Vector2, type BufferGeometry, type Texture } from 'three';
+import { createCanvas, context2d } from '../texutil';
+import { tiledNormal } from '../assets';
 import { pillowGeometry, boardOf } from '../../products/cartons';
 import { tubeGeometry, pouchGeometry, jarGeometry, POUCH_FILMS } from '../../products/packaging';
 import { mm } from '../../products/geom';
@@ -10,7 +12,7 @@ import { fbm } from '../../lib/random';
 import { grid, revolve, printMaterial, surfaceUV, bleedBox, glassMaterial, metalMaterial, CAP_COLORS } from '../build';
 import { compose, applyComposite, installDetailBump, detailUniforms, type Composite } from '../finishing';
 import { Bag, type ModelInput, type ProductModel } from './common';
-import { labelPatch, stockLook } from './bottle';
+import { labelPatch, labelMeshes, stockLook } from './bottle';
 import type { SurfaceTexture } from '../types';
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -50,6 +52,8 @@ export function buildPillow(input: ModelInput): ProductModel {
   const bag = new Bag();
   const group = new Group();
   const mat = printMaterial({ side: DoubleSide, bumpScale: 0.8 });
+  mat.normalMap = bag.texture(tiledNormal(board.value === 'kraft' ? 'kraft' : 'paper', box.w / mm(22), box.h / mm(22)));
+  mat.normalScale = new Vector2(0.3, 0.3);
   bag.add(mat);
   let meshes: { front: BufferGeometry; back: BufferGeometry } | null = null;
   const build = (thick: number) => {
@@ -105,6 +109,9 @@ export function buildTube(input: ModelInput): ProductModel {
   const R = g.D / 2, Rl = g.Dl / 2;
   const bodyMat = printMaterial({ side: FrontSide, bumpScale: 0.6 });
   const bb = bleedBox(bodyS);
+  const fibre = material === 'white' ? 'paper' : 'kraft';
+  bodyMat.normalMap = bag.texture(tiledNormal(fibre, bb.w / mm(22), bb.h / mm(22)));
+  bodyMat.normalScale = new Vector2(0.35, 0.35);
   const C = Math.PI * g.D;
   bag.mesh(revolve([[0, R], [g.Hb, R]], 120, (f, _j, y) => surfaceUV(bb, f * C, g.roll + (g.Hb - y))), bodyMat, group);
   bag.mesh(revolve([[0, R - g.wall], [g.Hb, R - g.wall]], 64, undefined, -Math.PI, Math.PI, true), inner, group);
@@ -117,6 +124,8 @@ export function buildTube(input: ModelInput): ProductModel {
   const lid = new Group();
   const lidMat = printMaterial({ side: FrontSide, bumpScale: 0.6 });
   const lb = bleedBox(lidS);
+  lidMat.normalMap = bag.texture(tiledNormal(fibre, lb.w / mm(22), lb.h / mm(22)));
+  lidMat.normalScale = new Vector2(0.35, 0.35);
   const Cl = Math.PI * g.Dl;
   bag.mesh(revolve([[0, Rl], [g.Hl, Rl]], 120, (f, _j, y) => surfaceUV(lb, f * Cl, g.Hl - y)), lidMat, lid);
   bag.mesh(revolve([[0, Rl - g.wall], [g.Hl, Rl - g.wall]], 64, undefined, -Math.PI, Math.PI, true), inner, lid);
@@ -169,27 +178,36 @@ export function buildPouch(input: ModelInput): ProductModel {
   const group = new Group();
   const Hv = g.H - g.G * 0.5;
   const visible = g.H - g.G;
+  // Seal fins stay flat; the body between them puffs up like a filled pouch, fullest low down
+  // where the gusset opens, with soft creases running into the seals.
+  const sealU = g.side / g.W, sealV = g.top / Hv;
   const depth = (u: number, v: number) => {
-    const body = g.G * 0.95 * Math.pow(1 - v, 1.4) + g.W * 0.2 * Math.sin(Math.PI * Math.min(1, v / 0.88)) * Math.pow(1 - v, 0.3);
-    const seal = 1 - sstep(0.85, 0.93, v);
-    const wr = (fbm(u * 5, v * 7, 3, 4) - 0.5) * mm(2.2) * Math.sin(Math.PI * u);
-    return Math.max(0, body * seal * Math.pow(Math.sin(Math.PI * u), 0.55) + wr * seal);
+    const ue = clamp01((u - sealU) / (1 - 2 * sealU));
+    const ve = clamp01(v / (1 - sealV));
+    const across = Math.pow(Math.sin(Math.PI * ue), 0.5);
+    const body = g.G * 0.95 * Math.pow(1 - ve, 1.5) + g.W * 0.21 * Math.sin(Math.PI * Math.min(1, ve / 0.9)) * Math.pow(1 - ve * 0.85, 0.35);
+    const shoulder = 1 - sstep(0.82, 1, ve);
+    const crease = (fbm(u * 6, v * 8, 3, 4) - 0.5) * mm(2.6) * Math.sin(Math.PI * ue) * (0.4 + ve);
+    return Math.max(0, (body * across + crease * across) * shoulder);
   };
-  const xAt = (u: number, v: number) => (u - 0.5) * g.W * (1 - 0.05 * Math.sin(Math.PI * Math.min(1, v / 0.88)) * (1 - v));
+  const xAt = (u: number, v: number) => (u - 0.5) * g.W * (1 - 0.06 * Math.sin(Math.PI * Math.min(1, v / 0.88)) * (1 - v));
   const surfaces = ['front', 'back'] as const;
   const mats: Record<string, MeshPhysicalMaterial> = {};
+  const finish = new Map<string, { normal: Texture; cut: Texture | null }>();
   for (const sid of surfaces) {
     const s = input.dieline.surfaces.find((x) => x.id === sid)!;
     const box = bleedBox(s);
     const sign = sid === 'front' ? 1 : -1;
-    const geo = grid(g.W, Hv, 48, 72, (u, v) => ({
-      x: sign * xAt(u, v), y: v * Hv, z: (sign * depth(u, v)) / 2,
+    const geo = grid(g.W, Hv, 64, 96, (u, v) => ({
+      // The two webs' fins sit a hair apart, so the sealed fins never share a plane.
+      x: sign * xAt(u, v), y: v * Hv, z: sign * (depth(u, v) / 2 + mm(0.12)),
       uv: surfaceUV(box, u * g.W, (1 - v) * visible),
     }));
     flipIfInward(geo, null, sign);
     const mat = printMaterial({ side: DoubleSide, bumpScale: 0.6 });
     mats[sid] = mat;
     bag.mesh(geo, mat, group);
+    finish.set(sid, pouchFinish(bag, s, box, g));
   }
   // Bottom gusset footprint.
   const foot = new CircleGeometry(1, 48);
@@ -204,16 +222,66 @@ export function buildPouch(input: ModelInput): ProductModel {
         const s = input.dieline.surfaces.find((x) => x.id === sid)!;
         const metal = film.value === 'metallised';
         printed(bag, sid, mats[sid], tex[sid], bleedBox(s), film.color, film.value === 'gloss' ? 0.22 : film.value === 'kraft' ? 0.88 : metal ? 0.22 : 0.55, film.value === 'gloss' ? 1 : 0, input.anisotropy, metal ? 'metal' : 'opaque');
+        const f = finish.get(sid)!;
+        // Crimped seals, the zipper bead and the tear notches.
+        mats[sid].normalMap = f.normal;
+        mats[sid].normalScale = new Vector2(0.9, 0.9);
+        if (f.cut) { mats[sid].alphaMap = f.cut; mats[sid].alphaTest = 0.5; mats[sid].transparent = false; }
+        if (metal) { mats[sid].anisotropy = 0.4; }
         if (film.value === 'kraft') {
-          const owned: import('three').Texture[] = [];
+          const owned: Texture[] = [];
           installDetailBump(mats[sid], detailUniforms('tooth', 18, 26, 0.5, input.anisotropy, owned), 'pouch-kraft');
           owned.forEach((t) => bag.texture(t));
-          mats[sid].needsUpdate = true;
         }
+        mats[sid].needsUpdate = true;
       }
     },
     dispose: () => bag.dispose(),
   };
+}
+
+/**
+ * The pouch web's own relief, in its texture box: a fine crimp pattern pressed into the side and
+ * top seals, the zipper bead, and the tear notches cut out of the fins (alpha).
+ */
+function pouchFinish(bag: Bag, s: { w: number; h: number; holes?: { x: number; y: number }[][] }, box: { x: number; y: number; w: number; h: number }, g: ReturnType<typeof pouchGeometry>): { normal: Texture; cut: Texture | null } {
+  const k = Math.min(6, 1600 / Math.max(box.w, box.h)); // px per pt
+  const W = Math.round(box.w * k), H = Math.round(box.h * k);
+  const c = createCanvas(W, H);
+  const ctx = context2d(c);
+  const img = ctx.createImageData(W, H);
+  const d = img.data;
+  const period = mm(0.9);
+  for (let j = 0; j < H; j++) {
+    const y = box.y + j / k;
+    for (let i = 0; i < W; i++) {
+      const x = box.x + i / k;
+      let nx = 0, ny = 0;
+      const inSide = (x < g.side || x > s.w - g.side) && y > 0;
+      const inTop = y < g.top && y > -mm(1);
+      if (inTop) nx = 0.55 * Math.cos((2 * Math.PI * x) / period);
+      else if (inSide) ny = 0.55 * Math.cos((2 * Math.PI * y) / period);
+      if (g.zip && Math.abs(y - g.zipY) < mm(1.4) && !inSide) { const t = (y - g.zipY) / mm(1.4); ny += 0.7 * t * Math.exp(-t * t * 1.5); }
+      const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+      const o = 4 * (j * W + i);
+      d[o] = (nx * 0.5 + 0.5) * 255; d[o + 1] = (-ny * 0.5 + 0.5) * 255; d[o + 2] = (nz * 0.5 + 0.5) * 255; d[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const normal = bag.texture(new CanvasTexture(c));
+  normal.colorSpace = NoColorSpace;
+  let cut: Texture | null = null;
+  if (s.holes && s.holes.length) {
+    const m = createCanvas(W, H);
+    const mc = context2d(m);
+    mc.fillStyle = '#fff'; mc.fillRect(0, 0, W, H);
+    mc.setTransform(k, 0, 0, k, -box.x * k, -box.y * k);
+    mc.fillStyle = '#000';
+    for (const h of s.holes) { mc.beginPath(); h.forEach((p, i) => (i ? mc.lineTo(p.x, p.y) : mc.moveTo(p.x, p.y))); mc.closePath(); mc.fill(); }
+    cut = bag.texture(new CanvasTexture(m));
+    cut.colorSpace = NoColorSpace;
+  }
+  return { normal, cut };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -267,8 +335,7 @@ export function buildJar(input: ModelInput): ProductModel {
   bag.mesh(top, topMat, group);
   // Label.
   const labelS = input.dieline.surfaces.find((s) => s.id === 'label')!;
-  const labelMat = printMaterial({ side: DoubleSide, bumpScale: 0.7 });
-  bag.mesh(labelPatch([[0, R], [g.H, R]], g.lw, g.ly, g.lh, 0, labelS, mm(0.3)), labelMat, group);
+  const { mat: labelMat } = labelMeshes(bag, labelPatch([[0, R], [g.H, R]], g.lw, g.ly, g.lh, 0, labelS, mm(0.3)), group, str(o, 'stock', 'white'), labelS);
   const stock = stockLook(str(o, 'stock', 'white'));
   return {
     group,

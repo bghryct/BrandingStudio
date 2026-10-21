@@ -31,10 +31,12 @@ export interface Sample {
   travel: number;
   fold: number;
   open: number;
+  /** Pour progress 0 … 1 (glass beside the product), or −1 when the pour is not animated. */
+  pour: number;
   cam: CameraKey | null;
 }
 
-export interface ProductTraits { lying?: boolean; rollRadius?: number; hasFold?: boolean; hasOpen?: boolean }
+export interface ProductTraits { lying?: boolean; rollRadius?: number; hasFold?: boolean; hasOpen?: boolean; canPour?: boolean; drink?: boolean }
 
 export const ANIMATIONS: { id: Exclude<AnimationMode, 'none'>; label: string; duration: number; description: string }[] = [
   { id: 'turntable', label: 'Turntable', duration: 8, description: 'A full 360° turn on the spot.' },
@@ -47,21 +49,25 @@ export const ANIMATIONS: { id: Exclude<AnimationMode, 'none'>; label: string; du
   { id: 'sway', label: 'Sway', duration: 6, description: 'A gentle swing, as if hanging in a shop.' },
   { id: 'float', label: 'Float', duration: 6, description: 'Hovering and drifting, for social loops.' },
   { id: 'reveal', label: 'Push in', duration: 5, description: 'A slow push from a wide shot into a close-up of the front.' },
+  { id: 'pour', label: 'Pour', duration: 8, description: 'The can or bottle tilts over a glass and fills it: stream, rising level, bubbles and foam.' },
+  { id: 'fizz', label: 'Fizz', duration: 6, description: 'A slow idle beside a full glass: bubbles rising and the dew catching the light.' },
 ];
 
 /** Animations offered for a product (template list first, then the generic ones). */
 export function animationsFor(templateModes: string[], traits: ProductTraits): typeof ANIMATIONS {
   const generic = ['turntable', 'hero', 'float', 'reveal'];
   const allowed = new Set([...templateModes, ...generic]);
+  if (traits.canPour) { allowed.add('pour'); }
+  if (traits.drink) { allowed.add('fizz'); }
   if (!traits.rollRadius) allowed.delete('roll');
   if (!traits.hasFold) allowed.delete('fold');
   if (!traits.hasOpen) { allowed.delete('slide'); allowed.delete('open'); allowed.delete('spin'); }
-  const order = [...templateModes, ...generic];
+  const order = [...templateModes, ...generic, 'pour', 'fizz'];
   return order.filter((v, i) => allowed.has(v) && order.indexOf(v) === i).map((id) => ANIMATIONS.find((a) => a.id === id)!).filter(Boolean);
 }
 
 export function restSample(traits: ProductTraits, fold = 1, open = 0): Sample {
-  return { spin: 0, tilt: 0, lift: 0, lying: 0, travel: 0, fold, open, cam: null };
+  return { spin: 0, tilt: 0, lift: 0, lying: 0, travel: 0, fold, open, pour: -1, cam: null };
 }
 
 const baseEl = (traits: ProductTraits) => (traits.lying ? 0.62 : 0.2);
@@ -70,7 +76,7 @@ export function sampleTimeline(mode: AnimationMode, t: number, duration: number,
   const d = Math.max(0.1, duration);
   let p = t / d;
   if (loop) p = ((p % 1) + 1) % 1; else p = clamp01(p);
-  const s: Sample = { spin: 0, tilt: 0, lift: 0, lying: 0, travel: 0, fold: 1, open: 0, cam: { az: -0.5, el: baseEl(traits), zoom: 1 } };
+  const s: Sample = { spin: 0, tilt: 0, lift: 0, lying: 0, travel: 0, fold: 1, open: 0, pour: -1, cam: { az: -0.5, el: baseEl(traits), zoom: 1 } };
   const el = baseEl(traits);
   switch (mode) {
     case 'turntable':
@@ -123,6 +129,15 @@ export function sampleTimeline(mode: AnimationMode, t: number, duration: number,
       s.cam = { az: lerp(-0.75, -0.08, k), el: lerp(el * 1.6, el * 0.55, k), zoom: lerp(1.55, 0.6, k), aimY: lerp(0, 0.08, k) };
       break;
     }
+    case 'pour':
+      // Hold the glass full for the last stretch; the loop starts again from an empty glass.
+      s.pour = Math.min(1, p / 0.94);
+      s.cam = { az: -0.28, el: 0.16, zoom: 0.9, stable: true };
+      break;
+    case 'fizz':
+      s.pour = 1;
+      s.cam = { az: -0.3 + 0.08 * Math.sin(p * Math.PI * 2), el: 0.14, zoom: 0.96, stable: true };
+      break;
     default:
       s.cam = null;
   }

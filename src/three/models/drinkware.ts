@@ -10,6 +10,8 @@ import { bool, str } from '../../products/types';
 import { revolve, profileBetween, printMaterial, plasticMaterial, surfaceUV, bleedBox } from '../build';
 import { compose, applyComposite } from '../finishing';
 import { Bag, type ModelInput, type ProductModel } from './common';
+import { tiledNormal } from '../assets';
+import { Vector2 } from 'three';
 
 export function buildCup(input: ModelInput): ProductModel {
   const o = input.options;
@@ -24,8 +26,11 @@ export function buildCup(input: ModelInput): ProductModel {
   // Printed band (the wrap) and plain paper below / above it.
   const band = profileBetween(g.rAt, g.y0, g.y1, 24);
   const bandMat = printMaterial({ side: FrontSide, bumpScale: 0.6 });
+  bandMat.normalMap = bag.texture(tiledNormal(paper === 'kraft' ? 'kraft' : 'paper', box.w / mm(20), box.h / mm(20)));
+  bandMat.normalScale = new Vector2(0.28, 0.28);
   bag.mesh(revolve(band, 128, (f, _j, y) => { const p = wrapToFlat(g.wrap, (y - g.y0) / (g.y1 - g.y0), f); return surfaceUV(box, p.x, p.y); }), bandMat, group);
   const plain = new MeshPhysicalMaterial({ color: new Color(base), roughness: 0.75 });
+  const dewProfile = profileBetween(g.rAt, mm(0.6), g.H - mm(2), 24);
   bag.mesh(revolve([[mm(1.2), g.rBottom - mm(1)], [0, g.rBottom - mm(0.4)], [mm(0.6), g.rBottom], ...profileBetween(g.rAt, mm(0.6), g.y0, 3)], 96), plain, group);
   // Rolled rim.
   const rimProf: [number, number][] = [[g.y1, g.rAt(g.y1)]];
@@ -53,7 +58,7 @@ export function buildCup(input: ModelInput): ProductModel {
   }
   return {
     group,
-    info: { rollRadius: g.rTop },
+    info: { rollRadius: g.rTop, dew: { profile: dewProfile, y0: mm(1), y1: g.H - mm(4), materials: [bandMat, plain] } },
     pose: () => undefined,
     applyTextures(tex) {
       const c = compose({ art: tex[s.id]?.art ?? null, masks: tex[s.id]?.masks ?? {}, base, roughness: 0.62, metalness: 0, clearcoat: 0, mode: 'opaque', widthPt: box.w, anisotropy: input.anisotropy });

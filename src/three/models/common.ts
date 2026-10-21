@@ -2,6 +2,8 @@ import { Group, Mesh, type Material, type Object3D, type Texture } from 'three';
 import type { Dieline, Opts } from '../../products/types';
 import type { SurfaceTextures } from '../types';
 import type { Composite } from '../finishing';
+import type { DewTarget } from '../dew';
+import type { PourSource } from '../pour';
 
 export interface PoseParams {
   /** 0 = flat sheet … 1 = assembled (cartons, pillow). */
@@ -10,6 +12,8 @@ export interface PoseParams {
   open: number;
   /** Rotation of a rolling product about its own axis (rad). */
   roll: number;
+  /** Pour progress (0 = not pouring … 1): bottles drop their closure and empty. */
+  pour?: number;
 }
 
 export interface ModelInput {
@@ -33,6 +37,10 @@ export interface ProductModel {
     rollRadius?: number;
     hasFold?: boolean;
     hasOpen?: boolean;
+    /** Revolved outer surface and materials that take condensation. */
+    dew?: DewTarget;
+    /** Where it pours from (cans and bottles). */
+    pour?: PourSource;
   };
 }
 

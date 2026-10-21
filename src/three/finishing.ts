@@ -181,7 +181,9 @@ export interface CompositeSource {
   /** Physical size of the art in pt (for blur radii). */
   widthPt: number;
   anisotropy: number;
+  /** Longest edge of the maps (default 8192) and their pixel budget (default 24 MP). */
   maxPx?: number;
+  maxPixels?: number;
 }
 
 function readMask(src: HTMLCanvasElement, w: number, h: number, scratch: HTMLCanvasElement): Float32Array | null {
@@ -239,10 +241,13 @@ export function dataTexture(canvas: HTMLCanvasElement, anisotropy: number): Canv
 
 export function compose(src: CompositeSource): Composite {
   const art = src.art;
-  const maxPx = src.maxPx ?? 2048;
+  // The maps follow the art's own resolution (the caller sizes the art for the view), within the
+  // GPU's edge and a memory budget.
+  const maxPx = src.maxPx ?? 8192;
+  const maxPixels = src.maxPixels ?? 24e6;
   let w = 2, h = 2;
   if (art && art.width > 1 && art.height > 1) {
-    const k = Math.min(1, maxPx / Math.max(art.width, art.height), Math.sqrt(4e6 / (art.width * art.height)));
+    const k = Math.min(1, maxPx / Math.max(art.width, art.height), Math.sqrt(maxPixels / (art.width * art.height)));
     w = Math.max(2, Math.round(art.width * k));
     h = Math.max(2, Math.round(art.height * k));
   }
@@ -275,7 +280,11 @@ export function compose(src: CompositeSource): Composite {
   const foilKeys = (['gold-foil', 'silver-foil', 'copper-foil', 'holo-foil'] as FinishKey[]).filter((k) => masks[k]);
   const foilMasks = foilKeys.map((k) => masks[k] as Float32Array), foilDefs = foilKeys.map((k) => FOIL[k]!);
   const holo = masks['holo-foil'] ?? null;
-  const height = new Float32Array(n).fill(0.5);
+  // Without finishes (and with flat inks) the surface and height maps are uniform: keep them tiny,
+  // so sharp, large art costs one colour map rather than three.
+  const uniform = !Object.keys(masks).length && src.mode !== 'screen' && src.mode !== 'embroidery';
+  const height = new Float32Array(uniform ? 1 : n).fill(0.5);
+  if (!uniform) {
   if (deb) for (let i = 0; i < n; i++) height[i] -= 0.42 * deb[i];
   if (emb) for (let i = 0; i < n; i++) height[i] += 0.42 * emb[i];
   for (const fm of foilMasks) for (let i = 0; i < n; i++) height[i] -= 0.08 * fm[i];
@@ -283,13 +292,19 @@ export function compose(src: CompositeSource): Composite {
   if (coverage && (src.mode === 'screen')) for (let i = 0; i < n; i++) height[i] += 0.06 * coverage[i];
   if (coverage && src.mode === 'embroidery') for (let i = 0; i < n; i++) height[i] += 0.35 * coverage[i];
   blurInPlace(height, w, h, Math.max(1, Math.round(0.4 * ppp)));
+  }
   const base = parseColor(src.base);
   const colorImg = cctx.getImageData(0, 0, w, h);
   const cd = colorImg.data;
-  const surfaceCanvas = createCanvas(w, h), bumpCanvas = createCanvas(w, h);
+  const sw = uniform ? 4 : w, sh = uniform ? 4 : h;
+  const surfaceCanvas = createCanvas(sw, sh), bumpCanvas = createCanvas(sw, sh);
   const sctx = context2d(surfaceCanvas), bctx = context2d(bumpCanvas);
-  const surf = sctx.createImageData(w, h), bimg = bctx.createImageData(w, h);
+  const surf = sctx.createImageData(sw, sh), bimg = bctx.createImageData(sw, sh);
   const sd = surf.data, bd = bimg.data;
+  if (uniform) {
+    const ccv = clamp01(src.clearcoat) * 255, rv = clamp01(src.roughness) * 255, mv = clamp01(src.mode === 'metal' ? 1 : src.metalness) * 255;
+    for (let j = 0; j < sd.length; j += 4) { sd[j] = ccv; sd[j + 1] = rv; sd[j + 2] = mv; sd[j + 3] = 255; bd[j] = bd[j + 1] = bd[j + 2] = 128; bd[j + 3] = 255; }
+  }
   let alphaCanvas: HTMLCanvasElement | null = null, ad: Uint8ClampedArray | null = null, aimg: ImageData | null = null;
   if (clear) { alphaCanvas = createCanvas(w, h); aimg = context2d(alphaCanvas).createImageData(w, h); ad = aimg.data; }
   let holoCanvas: HTMLCanvasElement | null = null, hd: Uint8ClampedArray | null = null, himg: ImageData | null = null;
@@ -333,9 +348,11 @@ export function compose(src: CompositeSource): Composite {
     if (gloss && gloss[i] > 0) { rough += (0.08 - rough) * gloss[i]; cc = Math.max(cc, gloss[i]); }
     cd[j] = r; cd[j + 1] = g; cd[j + 2] = b;
     if (clear) cd[j + 3] = 255;
-    sd[j] = clamp01(cc) * 255; sd[j + 1] = clamp01(rough) * 255; sd[j + 2] = clamp01(metal) * 255; sd[j + 3] = 255;
-    const hv = clamp01(height[i]) * 255;
-    bd[j] = hv; bd[j + 1] = hv; bd[j + 2] = hv; bd[j + 3] = 255;
+    if (!uniform) {
+      sd[j] = clamp01(cc) * 255; sd[j + 1] = clamp01(rough) * 255; sd[j + 2] = clamp01(metal) * 255; sd[j + 3] = 255;
+      const hv = clamp01(height[i]) * 255;
+      bd[j] = hv; bd[j + 1] = hv; bd[j + 2] = hv; bd[j + 3] = 255;
+    }
     if (ad) {
       let a = src.mode === 'etched' ? Math.min(1, cov) * 0.9 : Math.max(cov, wb);
       for (const fm of foilMasks) a = Math.max(a, fm[i]);
@@ -369,7 +386,8 @@ export function applyComposite(m: MeshPhysicalMaterial, c: Composite, clearcoatR
   m.roughness = 1;
   m.metalness = 1;
   m.bumpMap = c.bump;
-  m.clearcoat = c.hasClearcoat ? 1 : 0;
+  // A dew layer (water as clearcoat) keeps the coat compiled in even where the print has none.
+  m.clearcoat = c.hasClearcoat ? 1 : m.userData.dewCoat ? 1e-4 : 0;
   m.clearcoatMap = c.hasClearcoat ? c.surface : null;
   m.clearcoatRoughness = c.hasGloss ? 0.04 : clearcoatRoughness;
   m.iridescence = c.holo ? 1 : 0;

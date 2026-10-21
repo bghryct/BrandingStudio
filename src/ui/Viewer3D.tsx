@@ -6,7 +6,10 @@ import { ProductScene, SCENE_UNITS_PER_PT } from '../three/ProductScene';
 import { buildModel, type ProductModel } from '../three/models';
 import { animationsFor, ANIMATIONS } from '../three/animation';
 import type { AnimationMode, LightingPreset, LightingOptions, BackdropPreset, SurfaceTextures } from '../three/types';
-import { buildProductTextures } from '../render/productTextures';
+import { buildProductTextures, surfaceDensity } from '../render/productTextures';
+import { autoEnv, ENV_PRESETS } from '../three/env';
+import { preloadAssets } from '../three/assets';
+import { LIQUIDS, type LiquidKind } from '../three/pour';
 import { useFontStore } from '../engine/fonts';
 import { exportVideo, getVideoSupport, type VideoFormat, type VideoSupport } from '../export/video';
 import { downloadBlob, safeName } from './projectIO';
@@ -23,7 +26,7 @@ const LIGHTS: { id: LightingPreset; label: string }[] = [
 ];
 
 const BACKDROPS: { id: BackdropPreset; label: string; color: string; color2: string }[] = [
-  { id: 'studio-sweep', label: 'Studio sweep', color: '#dcd7cf', color2: '#b9b2a6' },
+  { id: 'studio-sweep', label: 'Studio sweep', color: '#d8d8d6', color2: '#b4b3b0' },
   { id: 'solid', label: 'Solid', color: '#e8e4dc', color2: '#c8c2b8' },
   { id: 'gradient', label: 'Gradient', color: '#f1ece3', color2: '#9e978b' },
   { id: 'wood', label: 'Oak table', color: '#8a5a36', color2: '#5c3a22' },
@@ -61,8 +64,10 @@ function onSet(products: Product[], activeId: string, lineup: boolean): Product[
 
 const LYING = ['card', 'letterhead', 'pillow'];
 const ROLLING = ['can', 'bottle', 'jar', 'tube', 'cup'];
-const FOLDING = ['tuck-reverse', 'tuck-straight', 'mailer', 'sleeve', 'pillow'];
+const FOLDING = ['tuck-reverse', 'tuck-straight', 'mailer', 'sleeve', 'pillow', 'paper-bag'];
 const OPENING = ['sleeve', 'tube', 'card'];
+const POURING = ['can', 'bottle'];
+const DRINKS = ['can', 'bottle', 'cup'];
 
 export default function Viewer3D() {
   const project = useStore((s) => s.project);
@@ -73,13 +78,21 @@ export default function Viewer3D() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const sceneRef = useRef<ProductScene | null>(null);
   const modelsRef = useRef<ProductModel[]>([]);
-  const texRef = useRef(new Map<string, { product: Product; version: number; tex: SurfaceTextures }>());
+  const texRef = useRef(new Map<string, { product: Product; version: number; tex: SurfaceTextures; ppp: number }>());
+  /** Density the hero's textures were built at (px per pt), and the latest state the sharpener reads. */
+  const densityRef = useRef<{ id: string; ppp: number }>({ id: '', ppp: 0 });
+  const liveRef = useRef<{ project: typeof project; products: Product[]; fontVersion: number }>({ project, products: [], fontVersion });
+  const sharpenRef = useRef<{ busy: boolean; again: boolean }>({ busy: false, again: false });
   const [playing, setPlaying] = useState(true);
   const [building, setBuilding] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /** Bumps when the Blender assets (cloth garments, ice, normal maps) have loaded: models rebuild. */
+  const [assetsReady, setAssetsReady] = useState(0);
+  useEffect(() => { let live = true; void preloadAssets().then(() => { if (live) setAssetsReady((v) => v + 1); }); return () => { live = false; }; }, []);
   const [scrub, setScrub] = useState(0);
   const [fold, setFold] = useState(1);
   const [open, setOpen] = useState(0);
+  const [pour, setPour] = useState(1);
   const rootRef = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
   useEffect(() => {
@@ -91,13 +104,14 @@ export default function Viewer3D() {
   }, []);
 
   const products = useMemo(() => onSet(project.products, activeId, st.lineup), [project.products, activeId, st.lineup]);
+  liveRef.current = { project, products, fontVersion };
   const hero = products[0] ?? null;
   const geoKey = products.map((p) => `${p.id}:${p.template}`).join(',');
   const optionsKey = products.map((p) => p.options);
   const traits = useMemo(() => {
     if (!hero) return {};
     const id = hero.template;
-    return { lying: LYING.includes(id), rollRadius: ROLLING.includes(id) ? 1 : undefined, hasFold: FOLDING.includes(id), hasOpen: OPENING.includes(id) };
+    return { lying: LYING.includes(id), rollRadius: ROLLING.includes(id) ? 1 : undefined, hasFold: FOLDING.includes(id), hasOpen: OPENING.includes(id), canPour: POURING.includes(id), drink: POURING.includes(id) };
   }, [hero]);
   const multi = st.lineup && products.length > 1;
   const anims = useMemo(() => (hero ? (multi ? ANIMATIONS.filter((a) => ['turntable', 'hero', 'float', 'reveal'].includes(a.id)) : animationsFor(getTemplate(hero.template).animations, traits)) : []), [hero, traits, multi]);
@@ -121,15 +135,25 @@ export default function Viewer3D() {
     }
     sceneRef.current = sc;
     if (import.meta.env.DEV) (window as unknown as { __scene: ProductScene }).__scene = sc;
+    // Re-rasterise the hero's art when the camera settles closer than its textures can resolve.
+    let timer = 0;
+    sc.onCameraChange = () => { window.clearTimeout(timer); timer = window.setTimeout(() => { void sharpen(); }, 380); };
     const ro = new ResizeObserver(() => {
       const el = wrapRef.current;
       if (el) sc.resize(el.clientWidth, el.clientHeight, Math.min(2, window.devicePixelRatio || 1));
     });
     if (wrapRef.current) ro.observe(wrapRef.current);
-    return () => { ro.disconnect(); sc.dispose(); sceneRef.current = null; };
+    return () => { ro.disconnect(); window.clearTimeout(timer); sc.onCameraChange = null; sc.dispose(); sceneRef.current = null; };
   }, []);
 
+  const refreshOpts = () => ({
+    dew: { amount: st.dew, size: st.dewSize, drips: st.drips, frost: st.dew > 0 ? st.frost : 0 },
+    ice: st.ice, iceBed: st.iceBed, glass: st.glass, liquid: st.liquid, liquidColor: st.liquidColor, glassIce: st.glassIce,
+  });
   function applyAll() {
+    call((s) => s.setRefresh(refreshOpts()));
+    call((s) => s.setToneMapping(st.tone));
+    call((s) => s.setEnvironment(st.env === 'auto' ? autoEnv(st.lighting) : st.env));
     call((s) => s.setLighting({ preset: st.lighting, ...st.light }));
     call((s) => s.setBackdrop({ preset: st.backdrop, color: st.color, color2: st.color2, showGround: st.ground }));
     call((s) => s.setCamera({ fov: st.fov }));
@@ -160,7 +184,7 @@ export default function Viewer3D() {
       console.error(e);
       setError(`Could not build the 3D model: ${(e as Error).message}`);
     }
-  }, [geoKey, ...optionsKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [geoKey, assetsReady, ...optionsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Textures follow every visual change (debounced).
   useEffect(() => {
@@ -171,10 +195,16 @@ export default function Viewer3D() {
         for (let i = 0; i < products.length; i++) {
           const p = products[i];
           const prev = texRef.current.get(p.id);
-          if (prev && prev.product === p && prev.version === fontVersion) continue;
-          const tex = await buildProductTextures(project, p, { signal, maxPx: i === 0 ? 2560 : 1400 });
+          if (prev && prev.product === p && prev.version === fontVersion) {
+            if (i === 0) { densityRef.current = { id: p.id, ppp: prev.ppp }; void sharpen(); }
+            continue;
+          }
+          const want = i === 0 ? demandNow() : 0;
+          const tex = await buildProductTextures(project, p, { signal, maxPx: i === 0 ? 2560 : 1400, ppp: want || undefined });
           if (!tex || signal.cancelled) return;
-          texRef.current.set(p.id, { product: p, version: fontVersion, tex });
+          const ppp = i === 0 ? effectiveDensity(p, want) : 0;
+          texRef.current.set(p.id, { product: p, version: fontVersion, tex, ppp });
+          if (i === 0) densityRef.current = { id: p.id, ppp };
           modelsRef.current[i]?.applyTextures(tex);
           sceneRef.current?.invalidate();
         }
@@ -189,6 +219,9 @@ export default function Viewer3D() {
   }, [project, products, fontVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { call((s) => s.setLighting({ preset: st.lighting, ...st.light })); }, [st.lighting, st.light]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { call((s) => s.setEnvironment(st.env === 'auto' ? autoEnv(st.lighting) : st.env)); }, [st.env, st.lighting]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { call((s) => s.setToneMapping(st.tone)); }, [st.tone]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { call((s) => s.setRefresh(refreshOpts())); }, [st.dew, st.dewSize, st.drips, st.frost, st.ice, st.iceBed, st.glass, st.liquid, st.liquidColor, st.glassIce]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { call((s) => s.setBackdrop({ preset: st.backdrop, color: st.color, color2: st.color2, showGround: st.ground })); }, [st.backdrop, st.color, st.color2, st.ground]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { call((s) => s.setCamera({ fov: st.fov })); }, [st.fov]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { startMode(mode, playing); }, [mode, st.speed, st.loop]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -204,6 +237,46 @@ export default function Viewer3D() {
     }, 120);
     return () => window.clearInterval(id);
   }, [playing, mode]);
+
+  /** The density the view asks of the hero's art, rounded up to steps of √2 (fewer rebuilds). */
+  function demandNow(width?: number, height?: number): number {
+    const d = sceneRef.current?.getTextureDemand(width, height) ?? 0;
+    return d > 0 ? Math.pow(2, Math.ceil(Math.log2(d) * 2) / 2) : 0;
+  }
+  /** The highest density any of a product's surfaces actually gets for a request. */
+  function effectiveDensity(p: Product, want: number): number {
+    let best = 0;
+    for (const sf of dielineOf(p).surfaces) best = Math.max(best, surfaceDensity({ w: sf.w + 2 * sf.bleed, h: sf.h + 2 * sf.bleed }, { maxPx: 2560, ppp: want || undefined }));
+    return best;
+  }
+  /** Sharpen the hero's textures for the current view (or an export of width × height). */
+  async function sharpen(width?: number, height?: number): Promise<void> {
+    const flight = sharpenRef.current;
+    if (flight.busy) { flight.again = true; return; }
+    const { project: pr, products: list, fontVersion: fv } = liveRef.current;
+    const hero = list[0];
+    const s = sceneRef.current;
+    if (!hero || !s) return;
+    const want = demandNow(width, height);
+    const cur = densityRef.current;
+    if (cur.id !== hero.id || !want) return;
+    const eff = effectiveDensity(hero, want);
+    if (eff <= cur.ppp * 1.15) return;
+    flight.busy = true;
+    try {
+      const tex = await buildProductTextures(pr, hero, { maxPx: 2560, ppp: want });
+      if (!tex || liveRef.current.products[0] !== hero) return;
+      texRef.current.set(hero.id, { product: hero, version: fv, tex, ppp: eff });
+      modelsRef.current[0]?.applyTextures(tex);
+      densityRef.current = { id: hero.id, ppp: eff };
+      sceneRef.current?.invalidate();
+    } catch (e) {
+      console.warn('3D textures: could not sharpen', e);
+    } finally {
+      flight.busy = false;
+      if (flight.again) { flight.again = false; void sharpen(); }
+    }
+  }
 
   const togglePlay = () => {
     const s = sceneRef.current;
@@ -225,7 +298,7 @@ export default function Viewer3D() {
         <aside className={clsx('scroll-thin w-[268px] shrink-0 overflow-y-auto border-r border-ink-700 bg-ink-850', narrow && 'absolute inset-y-0 left-0 z-10 max-w-[85%] shadow-2xl')}>
           <ProductPicker />
           <ScenePanel anims={anims} mode={mode} startMode={(m) => startMode(m)} />
-          <ExportPanel scene={sceneRef} wrap={wrapRef} title={`${project.brand.name}-${hero?.name ?? 'product'}`} mode={mode} duration={baseDuration / st.speed} onDone={() => { applyAll(); startMode(mode, playing); }} />
+          <ExportPanel scene={sceneRef} wrap={wrapRef} title={`${project.brand.name}-${hero?.name ?? 'product'}`} mode={mode} duration={baseDuration / st.speed} prepare={(w, h) => sharpen(w, h)} onDone={() => { applyAll(); startMode(mode, playing); }} />
         </aside>
       )}
       <div ref={wrapRef} className="relative min-w-0 flex-1" style={{ background: bgCss }}>
@@ -265,6 +338,16 @@ export default function Viewer3D() {
                   setFold(v); setPlaying(false);
                   sceneRef.current?.setAnimation('none');
                   sceneRef.current?.setManual({ fold: v });
+                }} />
+              </label>
+            )}
+            {traits.canPour && !multi && (st.glass || mode === 'pour') && (
+              <label className="flex items-center gap-1.5 text-[10.5px] text-white/70" title="A still of the pour: 0 = empty glass, the middle = mid-pour, 1 = full">Pour
+                <input type="range" className="w-20" min={0} max={1} step={0.01} value={pour} onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  setPour(v); setPlaying(false);
+                  sceneRef.current?.setAnimation('none');
+                  sceneRef.current?.setManual({ pour: v });
                 }} />
               </label>
             )}
@@ -331,6 +414,8 @@ function ScenePanel({ anims, mode, startMode }: { anims: typeof ANIMATIONS; mode
               className={clsx('h-7 rounded border text-[10.5px]', st.lighting === l.id ? 'border-rubric bg-rubric/20 text-ink-100' : 'border-ink-700 text-ink-400 hover:text-ink-100')}>{l.label}</button>
           ))}
         </div>
+        <Select label="Environment (reflections)" value={st.env} options={[{ value: 'auto', label: 'Auto (follows the lighting)' }, ...ENV_PRESETS.map((e) => ({ value: e.id, label: e.label }))]} onChange={(v) => st.set({ env: v as typeof st.env })} />
+        <Select label="Tone mapping" value={st.tone} options={[{ value: 'neutral', label: 'Neutral (true brand colours)' }, { value: 'agx', label: 'AgX (filmic, soft highlights)' }, { value: 'aces', label: 'ACES (contrasty)' }]} onChange={(v) => st.set({ tone: v as typeof st.tone })} />
         <Slider label="Intensity" value={L.intensity} min={0} max={3} onChange={(v) => light('intensity', v)} />
         <Slider label="Key light direction" value={L.azimuth} min={-180} max={180} step={1} onChange={(v) => light('azimuth', v)} format={(v) => `${Math.round(v)}°`} />
         <Slider label="Key light height" value={L.elevation} min={5} max={85} step={1} onChange={(v) => light('elevation', v)} format={(v) => `${Math.round(v)}°`} />
@@ -358,6 +443,24 @@ function ScenePanel({ anims, mode, startMode }: { anims: typeof ANIMATIONS; mode
         <Toggle label="Ground & contact shadow" checked={st.ground} onChange={(v) => st.set({ ground: v })} />
         {st.backdrop === 'transparent' && <Hint>Stills export as PNG with alpha; WebM keeps transparency where the encoder supports it.</Hint>}
       </Section>
+      <Section title="Refreshing" id="s3d-refresh">
+        <Hint>Cold-drink styling for cans, bottles and cups: dew, ice and a glass to pour into.</Hint>
+        <Slider label="Condensation" value={st.dew} min={0} max={1} onChange={(v) => st.set({ dew: v })} format={(v) => (v < 0.02 ? 'off' : `${Math.round(v * 100)}%`)} />
+        {st.dew > 0.01 && (
+          <>
+            <Slider label="Droplet size" value={st.dewSize} min={0.5} max={2} onChange={(v) => st.set({ dewSize: v })} format={(v) => `${v.toFixed(2)}×`} />
+            <Slider label="Frost haze" value={st.frost} min={0} max={1} onChange={(v) => st.set({ frost: v })} format={(v) => `${Math.round(v * 100)}%`} />
+            <Toggle label="Running drips" checked={st.drips} onChange={(v) => st.set({ drips: v })} />
+          </>
+        )}
+        <Slider label="Ice cubes around" value={st.ice} min={0} max={12} step={1} onChange={(v) => st.set({ ice: v })} format={(v) => (v ? String(Math.round(v)) : 'none')} />
+        <Toggle label="Stand in crushed ice" checked={st.iceBed} onChange={(v) => st.set({ iceBed: v })} />
+        <Toggle label="Glass on set (pour into it)" checked={st.glass} onChange={(v) => st.set({ glass: v })} />
+        <Select label="Drink" value={st.liquid} options={(Object.keys(LIQUIDS) as LiquidKind[]).map((k) => ({ value: k, label: LIQUIDS[k].label }))} onChange={(v) => st.set({ liquid: v as LiquidKind, liquidColor: null })} />
+        <ColorField label="Drink colour" value={st.liquidColor ?? LIQUIDS[st.liquid].color} onChange={(v) => st.set({ liquidColor: v || null })} />
+        <Slider label="Ice in the glass" value={st.glassIce} min={0} max={5} step={1} onChange={(v) => st.set({ glassIce: v })} format={(v) => (v ? String(Math.round(v)) : 'none')} />
+        <Hint>Pick the Pour or Fizz animation, or use the Pour slider under the view for a mid-pour still.</Hint>
+      </Section>
       <Section title="Camera" id="s3d-camera">
         <Slider label="Lens" value={st.fov} min={15} max={75} step={1} onChange={(v) => st.set({ fov: v })} format={(v) => `${focal(v)} mm`} hint="Longer lenses flatten perspective for product shots" />
         <Hint>Drag to orbit, scroll to zoom, right-drag to pan; the reset button returns to automatic framing.</Hint>
@@ -366,7 +469,7 @@ function ScenePanel({ anims, mode, startMode }: { anims: typeof ANIMATIONS; mode
   );
 }
 
-function ExportPanel({ scene, wrap, title, mode, duration, onDone }: { scene: React.MutableRefObject<ProductScene | null>; wrap: React.RefObject<HTMLDivElement | null>; title: string; mode: AnimationMode; duration: number; onDone: () => void }) {
+function ExportPanel({ scene, wrap, title, mode, duration, prepare, onDone }: { scene: React.MutableRefObject<ProductScene | null>; wrap: React.RefObject<HTMLDivElement | null>; title: string; mode: AnimationMode; duration: number; prepare: (w: number, h: number) => Promise<void>; onDone: () => void }) {
   const st = useScene3D();
   const [orientation, setOrientation] = useState<OrientationId>('portrait');
   const [stillEdge, setStillEdge] = useState(2400);
@@ -376,6 +479,10 @@ function ExportPanel({ scene, wrap, title, mode, duration, onDone }: { scene: Re
   const [support, setSupport] = useState<VideoSupport | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
   const abort = useRef<AbortController | null>(null);
+  const [photoSamples, setPhotoSamples] = useState(128);
+  const [photoDenoise, setPhotoDenoise] = useState(true);
+  const [photo, setPhoto] = useState<{ p: number; samples: number; t0: number } | null>(null);
+  const photoAbort = useRef<AbortController | null>(null);
 
   useEffect(() => { void getVideoSupport().then((s) => { setSupport(s); if (!s.mp4) setFormat(s.webm ? 'webm' : 'gif'); }); }, []);
   useEffect(() => { if (format === 'gif') { setFps(15); setVideoEdge((e) => Math.min(e, 800)); } }, [format]);
@@ -390,6 +497,8 @@ function ExportPanel({ scene, wrap, title, mode, duration, onDone }: { scene: Re
     if (!s) return;
     const { w, h } = sizeFor(orientation, stillEdge);
     try {
+      // Art as sharp as the export resolution needs.
+      await prepare(w, h);
       const canvas = s.renderStill(w, h);
       const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
       downloadBlob(blob, `${safeName(title)}-${orientation}-${w}x${h}.png`);
@@ -401,10 +510,34 @@ function ExportPanel({ scene, wrap, title, mode, duration, onDone }: { scene: Re
     }
   };
 
+  const renderPhoto = async () => {
+    const s = scene.current;
+    if (!s) return;
+    const { w, h } = sizeFor(orientation, stillEdge);
+    photoAbort.current = new AbortController();
+    const t0 = performance.now();
+    setPhoto({ p: 0, samples: 0, t0 });
+    s.pause();
+    try {
+      await prepare(w, h);
+      const canvas = await s.renderPhoto({ width: w, height: h, samples: photoSamples, denoise: photoDenoise ? {} : false, signal: photoAbort.current.signal, onProgress: (p, n) => setPhoto({ p, samples: n, t0 }) });
+      const blob = await new Promise<Blob>((res) => canvas.toBlob((b) => res(b!), 'image/png'));
+      downloadBlob(blob, `${safeName(title)}-photo-${w}x${h}.png`);
+      useStore.getState().notify(`Photo rendered — ${w} × ${h}, ${photoSamples} samples in ${((performance.now() - t0) / 1000).toFixed(0)} s.`);
+    } catch (e) {
+      if ((e as Error).name !== 'AbortError') useStore.getState().notify(`Photo render failed: ${(e as Error).message}`, 'error');
+    } finally {
+      setPhoto(null);
+      restore();
+      onDone();
+    }
+  };
+
   const video = async () => {
     const s = scene.current;
     if (!s || mode === 'none') return;
     const { w, h } = sizeFor(orientation, videoEdge);
+    await prepare(w, h);
     abort.current = new AbortController();
     setProgress(0);
     s.pause();
@@ -439,6 +572,23 @@ function ExportPanel({ scene, wrap, title, mode, duration, onDone }: { scene: Re
         <div className="mb-1 flex items-center gap-1.5 text-[11px] text-ink-200"><ImageIcon size={12} /> Still image</div>
         <Select label="Long edge" value={String(stillEdge)} options={[1200, 1600, 2400, 3200, 4096].map((v) => ({ value: String(v), label: `${v} px` }))} onChange={(v) => setStillEdge(Number(v))} />
         <Button variant="primary" className="mt-2 w-full" onClick={still}>Render PNG · {ss.w} × {ss.h}</Button>
+      </div>
+      <div className="rounded-md border border-ink-700 p-2">
+        <div className="mb-1 flex items-center gap-1.5 text-[11px] text-ink-200"><Camera size={12} /> Photo (path-traced)</div>
+        <Select label="Samples" value={String(photoSamples)} options={[32, 64, 128, 256, 512, 1024].map((v) => ({ value: String(v), label: `${v} samples${v <= 32 ? ' · preview' : v <= 64 ? ' · draft' : v === 128 ? ' · good' : v >= 512 ? ' · final' : ''}` }))} onChange={(v) => setPhotoSamples(Number(v))} />
+        <Toggle label="Denoise (keeps print sharp)" checked={photoDenoise} onChange={setPhotoDenoise} />
+        {photo ? (
+          <div className="mt-2 space-y-1.5">
+            <div className="h-1.5 overflow-hidden rounded bg-ink-700"><div className="h-full bg-rubric" style={{ width: `${Math.round(photo.p * 100)}%` }} /></div>
+            <div className="flex items-center justify-between text-[11px] text-ink-300">
+              <span>Tracing… {Math.floor(photo.samples)} / {photoSamples}{photo.p > 0.04 ? ` · ~${Math.max(1, Math.round(((performance.now() - photo.t0) / 1000) * (1 / photo.p - 1)))} s left` : ''}</span>
+              <Button variant="ghost" onClick={() => photoAbort.current?.abort()}>Cancel</Button>
+            </div>
+          </div>
+        ) : (
+          <Button variant="primary" className="mt-2 w-full" onClick={renderPhoto}>Render photo · {ss.w} × {ss.h}</Button>
+        )}
+        <Hint>Path-traces the shot with the studio HDRI: real refraction through glass, drinks, ice and drops, and soft shadows. Uses the still&apos;s aspect and size; the live view stays fast. At 1600 px, 128 samples take a few minutes on a laptop GPU.</Hint>
       </div>
       <div className="rounded-md border border-ink-700 p-2">
         <div className="mb-1 flex items-center gap-1.5 text-[11px] text-ink-200"><Film size={12} /> Motion · {ANIMATIONS.find((a) => a.id === mode)?.label ?? 'choose an animation'}</div>

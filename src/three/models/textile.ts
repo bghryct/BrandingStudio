@@ -5,7 +5,7 @@
  * inflated silhouette (an SDF of the garment outline) with a woven / knitted micro-relief.
  */
 import {
-  CatmullRomCurve3, Color, DoubleSide, BackSide, FrontSide, ExtrudeGeometry, Group, MeshPhysicalMaterial, Shape, SphereGeometry, Vector3, type Texture,
+  CatmullRomCurve3, Color, DoubleSide, BackSide, FrontSide, ExtrudeGeometry, Group, MeshBasicMaterial, MeshPhysicalMaterial, Shape, ShapeGeometry, SphereGeometry, TubeGeometry, Vector3, type Texture,
 } from 'three';
 import { toteGeometry, garmentShape, garmentPrints, sleeveFrame, fabricColor, capPrints } from '../../products/apparel';
 import { mm } from '../../products/geom';
@@ -17,6 +17,8 @@ import { grid, printMaterial } from '../build';
 import { compose, applyComposite, installDetailBump, detailUniforms, dataTexture, type DetailKind } from '../finishing';
 import { createCanvas, context2d } from '../texutil';
 import { Bag, type ModelInput, type ProductModel } from './common';
+import { assetMeshes, tiledNormal, type DetailMap } from '../assets';
+import { Vector2, type BufferGeometry, type Mesh } from 'three';
 import type { FinishKey, SurfaceTexture, SurfaceTextures } from '../types';
 
 type Method = 'screen' | 'dtg' | 'embroidery';
@@ -65,6 +67,88 @@ function detail(bag: Bag, mat: MeshPhysicalMaterial, kind: DetailKind, rx: numbe
   const owned: Texture[] = [];
   installDetailBump(mat, detailUniforms(kind, rx, ry, scale, anisotropy, owned), key);
   owned.forEach((t) => bag.texture(t));
+}
+
+/** Woven / knitted relief from a Blender-baked tileable normal map, `tile` mm per repeat over a W × H mm UV square. */
+function weaveNormal(bag: Bag, mat: MeshPhysicalMaterial, map: DetailMap, Wmm: number, Hmm: number, tile: number, strength: number) {
+  const t = bag.texture(tiledNormal(map, Wmm / tile, Hmm / tile));
+  mat.normalMap = t;
+  mat.normalScale = new Vector2(strength, strength);
+  mat.needsUpdate = true;
+}
+
+/**
+ * The cloth-simulated asset's layers (tools/blender/cloth.py), re-mapped for this size: positions
+ * in mm scaled by (kx, ky) and converted to pt; UVs, which hold the rest pattern position in the
+ * size-M panel box, mapped into this size's panel box (y flipped for the canvas textures).
+ */
+function clothLayers(asset: 'tee' | 'hoodie' | 'tote', box: { X0: number; Y0: number; W: number; H: number }, to: { x0: number; y0: number; W: number; H: number }, kx: number, ky: number): { front: BufferGeometry; back: BufferGeometry } | null {
+  const meshes = assetMeshes(asset, 'garment');
+  const find = (name: string) => meshes.find((m) => (Array.isArray(m.material) ? m.material[0] : m.material).name === name);
+  const f = find('front'), b = find('back');
+  if (!f || !b) return null;
+  const remap = (m: Mesh) => {
+    const g = m.geometry.clone();
+    const pos = g.getAttribute('position'), uv = g.getAttribute('uv');
+    const kz = (kx + ky) / 2;
+    for (let i = 0; i < pos.count; i++) pos.setXYZ(i, mm(pos.getX(i) * kx), mm(pos.getY(i) * ky), mm(pos.getZ(i) * kz));
+    for (let i = 0; i < uv.count; i++) {
+      const gx = (box.X0 + uv.getX(i) * box.W) * kx, gy = (box.Y0 + uv.getY(i) * box.H) * ky;
+      uv.setXY(i, (gx - to.x0) / to.W, 1 - (gy - to.y0) / to.H);
+    }
+    g.computeVertexNormals();
+    return g;
+  };
+  return { front: remap(f), back: remap(b) };
+}
+
+/**
+ * A ghost-mannequin garment is an open tube: the key light and the contact shadow fall straight
+ * through its hem and leave a bright hole in the floor shadow. A cap across the hem that only casts
+ * shadows (it draws nothing, and the path tracer skips it) closes the shadow like a body would.
+ */
+function hemShadowCap(res: Bag, parent: Group, geos: BufferGeometry[], floorY: number): void {
+  const pts: [number, number][] = [];
+  for (const g of geos) {
+    const pos = g.getAttribute('position');
+    for (let i = 0; i < pos.count; i++) if (pos.getY(i) < floorY + mm(30)) pts.push([pos.getX(i), pos.getZ(i)]);
+  }
+  if (pts.length < 3) return;
+  // Convex hull (monotone chain) of the hem in plan.
+  pts.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
+  const cross = (o: [number, number], a: [number, number], b: [number, number]) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (list: [number, number][]) => {
+    const h: [number, number][] = [];
+    for (const p of list) { while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], p) <= 0) h.pop(); h.push(p); }
+    h.pop();
+    return h;
+  };
+  const hull = [...half(pts), ...half([...pts].reverse())];
+  if (hull.length < 3) return;
+  // Slightly inside the hem so its edge never peeks out of the shadow.
+  const cx = hull.reduce((t, p) => t + p[0], 0) / hull.length, cz = hull.reduce((t, p) => t + p[1], 0) / hull.length;
+  const shape = new Shape(hull.map(([x, z]) => new Vector2(cx + (x - cx) * 0.94, cz + (z - cz) * 0.94)));
+  const geo = new ShapeGeometry(shape).rotateX(Math.PI / 2);
+  const mat = new MeshBasicMaterial({ colorWrite: false, depthWrite: false, side: DoubleSide });
+  const cap = res.mesh(geo, mat, parent);
+  cap.position.y = floorY + mm(20);
+  cap.castShadow = true;
+  cap.receiveShadow = false;
+  cap.userData.shadowOnly = true;
+}
+
+/** Panel box of the size-M patterns the cloth assets were simulated from (tools/blender/data/*.uvbox.json). */
+const CLOTH_BOX = {
+  tee: { X0: -409.3498597120673, Y0: -6, W: 818.6997194241346, H: 746 },
+  hoodie: { X0: -497.5419858454801, Y0: -241, W: 995.0839716909602, H: 941 },
+  tote: { X0: -190, Y0: 0, W: 380, H: 420 },
+};
+
+/** Art density of the incoming textures, px per mm (the panel canvas follows it, within a budget). */
+function artDensity(tex: SurfaceTextures, ids: string[]): number {
+  let k = 0;
+  for (const id of ids) { const t = tex[id]; if (t) k = Math.max(k, t.art.width / (t.box.w / mm(1))); }
+  return k;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -125,13 +209,27 @@ export function buildTote(input: ModelInput): ProductModel {
     + mm(3.5) * Math.sin(u * Math.PI * 4 + fbm(u * 3, v * 2, 2, 9) * 3) * Math.pow(v, 1.6) * Math.sin(Math.PI * u)
     + (fbm(u * 6, v * 6, 3, 21) - 0.5) * mm(4) * Math.sin(Math.PI * u) * Math.sin(Math.PI * v);
   const mats: Record<string, MeshPhysicalMaterial> = {};
+  // Cloth-simulated bag (hangs from its handles with drape folds), or the procedural drape.
+  const cloth = clothLayers('tote', CLOTH_BOX.tote, { x0: 0, y0: 0, W: Wm, H: Hm }, Wm / 380, Hm / 420);
+  if (cloth) {
+    // Its UVs run across the bag in front-view coordinates (x0 = −W/2): shift to the canvas.
+    for (const geo of [cloth.front, cloth.back]) {
+      const uv = geo.getAttribute('uv');
+      for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) + 0.5);
+    }
+  }
   for (const side of ['front', 'back'] as const) {
     const sign = side === 'front' ? 1 : -1;
-    const geo = grid(g.W, g.H, 64, 72, (u, v) => ({ x: sign * (u - 0.5) * g.W, y: (1 - v) * g.H, z: (sign * drape(u, v)), uv: [u, 1 - v] }));
-    if (side === 'back') { const idx = geo.getIndex()!.array as Uint16Array; for (let i = 0; i < idx.length; i += 3) { const t = idx[i + 1]; idx[i + 1] = idx[i + 2]; idx[i + 2] = t; } geo.computeVertexNormals(); }
+    let geo: BufferGeometry;
+    if (cloth) geo = cloth[side];
+    else {
+      geo = grid(g.W, g.H, 64, 72, (u, v) => ({ x: sign * (u - 0.5) * g.W, y: (1 - v) * g.H, z: (sign * drape(u, v)), uv: [u, 1 - v] }));
+      if (side === 'back') { const idx = geo.getIndex()!.array as Uint16Array; for (let i = 0; i < idx.length; i += 3) { const t = idx[i + 1]; idx[i + 1] = idx[i + 2]; idx[i + 2] = t; } geo.computeVertexNormals(); }
+    }
     const mat = fabricMaterial(fabric, weave === 'cotton' ? 0.6 : 0.3);
     mat.side = DoubleSide;
-    detail(bag, mat, weave === 'jute' ? 'jute' : weave === 'canvas' ? 'canvas' : 'weave', Wm / 6, Hm / 6, 1.1, input.anisotropy, `tote-${weave}`);
+    if (weave === 'jute') detail(bag, mat, 'jute', Wm / 6, Hm / 6, 1.1, input.anisotropy, `tote-${weave}`);
+    else weaveNormal(bag, mat, 'canvas', Wm, Hm, weave === 'canvas' ? 9 : 6, weave === 'canvas' ? 0.9 : 0.6);
     mats[side] = mat;
     bag.mesh(geo, mat, group);
   }
@@ -162,9 +260,11 @@ export function buildTote(input: ModelInput): ProductModel {
     info: {},
     pose: () => undefined,
     applyTextures(tex) {
-      const k = Math.min(4, 2048 / Math.max(Wm, Hm));
+      // As sharp as the art that came in, within ~16 MP per side.
+      const k = Math.max(1, Math.min(artDensity(tex, ['front', 'back']) || 4, Math.sqrt(16e6 / (Wm * Hm))));
       for (const side of ['front', 'back'] as const) {
-        const { art, masks } = panelArt(tex, [{ id: side, x: px, y: top, w: pw, h: ph }], Wm, Hm, 0, 0, k);
+        // The cloth asset maps the back in front-view coordinates: mirror its artwork.
+        const { art, masks } = panelArt(tex, [{ id: side, x: px, y: top, w: pw, h: ph }], Wm, Hm, 0, 0, k, !!cloth && side === 'back');
         const c = compose({ art, masks, base: fabric, roughness: 0.92, metalness: 0, clearcoat: 0, mode: method, widthPt: g.W, anisotropy: input.anisotropy });
         bag.setComposite(side, c);
         applyComposite(mats[side], c);
@@ -202,7 +302,27 @@ export function buildGarment(input: ModelInput, kind: 'tee' | 'hoodie'): Product
   };
   const sides: { id: 'front' | 'back'; polys: P2[][]; holes: P2[][]; mat: MeshPhysicalMaterial }[] = [];
   const knit = kind === 'hoodie' ? 'weave' : 'knit';
-  for (const side of ['front', 'back'] as const) {
+  // Cloth-simulated garment (ghost mannequin with drape folds), scaled from size M.
+  const gm = garmentShape(kind, 'M');
+  const cloth = clothLayers(kind, CLOTH_BOX[kind], { x0, y0, W, H }, gs.chest / gm.chest, gs.length / gm.length);
+  if (cloth) {
+    // Hem a little above the floor, like the procedural garment.
+    let minY = Infinity;
+    for (const geo of [cloth.front, cloth.back]) { geo.computeBoundingBox(); minY = Math.min(minY, geo.boundingBox!.min.y); }
+    for (const side of ['front', 'back'] as const) {
+      const geo = cloth[side];
+      geo.translate(0, mm(lift) - minY, 0);
+      const mat = fabricMaterial(fabric, kind === 'hoodie' ? 0.85 : 0.7);
+      weaveNormal(res, mat, kind === 'hoodie' ? 'fleece' : 'jersey', W, H, kind === 'hoodie' ? 14 : 8, kind === 'hoodie' ? 0.7 : 0.55);
+      res.mesh(geo, mat, bag);
+      // Inside of the garment (through the neck, hem and cuffs).
+      const innerMat = new MeshPhysicalMaterial({ color: new Color(mix(fabric, '#000000', 0.25)), roughness: 0.95, side: BackSide, sheen: 0.4 });
+      res.mesh(geo, innerMat, bag, false);
+      sides.push({ id: side, polys: [], holes: [], mat });
+    }
+    hemShadowCap(res, bag, [cloth.front, cloth.back], mm(lift));
+  }
+  for (const side of (cloth ? [] : ['front', 'back']) as ('front' | 'back')[]) {
     const sign = side === 'front' ? 1 : -1;
     const polys = side === 'front' ? [gs.front] : [gs.back, ...(gs.hood ? [gs.hood] : [])];
     const keep: boolean[] = [];
@@ -241,7 +361,7 @@ export function buildGarment(input: ModelInput, kind: 'tee' | 'hoodie'): Product
     info: {},
     pose: () => undefined,
     applyTextures(tex) {
-      const k = Math.min(3, 1800 / Math.max(W, H));
+      const k = Math.max(1, Math.min(artDensity(tex, prints.map((p) => p.id)) || 3, Math.sqrt(16e6 / (W * H))));
       for (const s of sides) {
         const places: Placement[] = [];
         for (const p of prints) {
@@ -271,11 +391,11 @@ export function buildGarment(input: ModelInput, kind: 'tee' | 'hoodie'): Product
           ctx.beginPath(); gs.pocket.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y))); ctx.closePath(); ctx.stroke();
         }
         ctx.restore();
-        const c = compose({ art, masks, base: fabric, roughness: 0.95, metalness: 0, clearcoat: 0, mode: method, widthPt: mm(W), anisotropy: input.anisotropy, maxPx: 2048 });
+        const c = compose({ art, masks, base: fabric, roughness: 0.95, metalness: 0, clearcoat: 0, mode: method, widthPt: mm(W), anisotropy: input.anisotropy });
         res.setComposite(s.id, c);
         const alpha = s.mat.alphaMap;
         applyComposite(s.mat, c);
-        s.mat.alphaMap = alpha; s.mat.alphaTest = 0.5; s.mat.transparent = false;
+        s.mat.alphaMap = alpha; s.mat.alphaTest = alpha ? 0.5 : 0; s.mat.transparent = false;
         s.mat.needsUpdate = true;
       }
     },
@@ -311,7 +431,7 @@ export function buildCap(input: ModelInput): ProductModel {
   crownGeo.translate(0, yb - yBottom, 0);
   const crownMat = fabricMaterial(fabric, 0.5);
   crownMat.side = DoubleSide;
-  detail(bag, crownMat, 'canvas', 30, 12, 0.9, input.anisotropy, 'cap-twill');
+  weaveNormal(bag, crownMat, 'canvas', (2 * Math.PI * Rc) / mm(1), (Rc * theta) / mm(1), 5, 0.65);
   bag.mesh(crownGeo, crownMat, group);
   // Button on top.
   crownGeo.computeBoundingBox();
@@ -329,9 +449,20 @@ export function buildCap(input: ModelInput): ProductModel {
     return { x: bx + dx * len * t, y: yb - droop, z: bz + dz * len * t, uv: [s, t] };
   });
   const brimMat = new MeshPhysicalMaterial({ color: new Color(brimColor), roughness: 0.85, sheen: 0.4, sheenColor: new Color(mix(brimColor, '#ffffff', 0.5)), side: DoubleSide });
-  detail(bag, brimMat as MeshPhysicalMaterial, 'canvas', 18, 6, 0.6, input.anisotropy, 'cap-brim');
-  brimMat.bumpMap = null;
+  weaveNormal(bag, brimMat, 'canvas', 180, 80, 4, 0.6);
   bag.mesh(brimGeo, brimMat, group);
+  // The brim has a stiffened core: a second skin underneath and a rolled, stitched edge.
+  const brimUnder = brimGeo.clone();
+  brimUnder.translate(0, -mm(2.6), 0);
+  bag.mesh(brimUnder, brimMat, group);
+  const edgePts: Vector3[] = [];
+  for (let i = 0; i <= 48; i++) {
+    const lam = (i / 48 - 0.5) * 2 * lmax;
+    const len = Lb * Math.pow(Math.cos(lam * 0.92), 0.8);
+    const droop = mm(12) * Math.pow(Math.abs(lam) / lmax, 2) + mm(7);
+    edgePts.push(new Vector3(Rc * Math.sin(lam) + Math.sin(lam) * len, yb - droop - mm(1.3), Rc * 1.06 * Math.cos(lam) + Math.cos(lam) * len));
+  }
+  bag.mesh(new TubeGeometry(new CatmullRomCurve3(edgePts), 96, mm(1.4), 8, false), brimMat, group);
   const prints = capPrints(o);
   return {
     group,

@@ -40,7 +40,10 @@ export class ContactShadow {
     this.rtBlur = new WebGLRenderTarget(size, size);
     this.rtBlur.texture.generateMipmaps = false;
     const geo = new PlaneGeometry(1, 1).rotateX(Math.PI / 2);
-    this.plane = new Mesh(geo, new MeshBasicMaterial({ map: this.rt.texture, opacity: 0.85, transparent: true, depthWrite: false }));
+    // Depth-offset toward the camera: it lies a hair above the shadow catcher and the backdrop
+    // floor. Only gently: a stronger slope-scaled offset lets it win over paper lying a fraction of
+    // a millimetre above the floor at grazing views, and the sheet vanished under its own shadow.
+    this.plane = new Mesh(geo, new MeshBasicMaterial({ map: this.rt.texture, opacity: 0.85, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4 }));
     this.plane.renderOrder = 1;
     // The render target is seen from below, so flip it back.
     this.plane.scale.y = -1;

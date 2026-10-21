@@ -27,7 +27,7 @@ type Look = Omit<ResolvedLighting, 'preset'>;
 
 const LOOKS: Record<LightingPreset, Look> = {
   // Large key at 3/4, gentle fill and rim: the neutral catalogue look.
-  'studio': { intensity: 1, azimuth: -55, elevation: 50, warmth: 0.12, exposure: 1, shadowSoftness: 0.6, ambient: 1, fill: 0.32, rim: 0.55, rimColor: '#ffffff', spot: 0, backdrop: 1 },
+  'studio': { intensity: 1, azimuth: -55, elevation: 50, warmth: 0.04, exposure: 1, shadowSoftness: 0.6, ambient: 1, fill: 0.32, rim: 0.55, rimColor: '#ffffff', spot: 0, backdrop: 1 },
   // Huge diffused source almost overhead: shadowless wrap-around light.
   'soft-box': { intensity: 1, azimuth: -25, elevation: 62, warmth: 0.04, exposure: 1.06, shadowSoftness: 1, ambient: 1.25, fill: 0.5, rim: 0.3, rimColor: '#ffffff', spot: 0, backdrop: 1 },
   // Cool daylight raking in from one side, little fill.

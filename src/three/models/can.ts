@@ -4,13 +4,15 @@
  * back; white base coat or bare metal with transparent inks; gloss / satin / matte varnish and
  * optional condensation droplets.
  */
-import { Color, ExtrudeGeometry, Group, Shape, DoubleSide, FrontSide, type Texture } from 'three';
+import { Color, ExtrudeGeometry, Group, MeshPhysicalMaterial, Shape, DoubleSide, FrontSide, Vector2, type Texture } from 'three';
+import { tiledNormal } from '../assets';
 import { canGeometry } from '../../products/cans';
 import { mm } from '../../products/geom';
 import { str, bool } from '../../products/types';
 import { revolve, printMaterial, metalMaterial, surfaceUV, bleedBox } from '../build';
 import { compose, applyComposite, installDetailBump, detailUniforms } from '../finishing';
 import { Bag, type ModelInput, type ProductModel } from './common';
+import { Vector3 } from 'three';
 
 const smooth = (t: number) => t * t * (3 - 2 * t);
 
@@ -44,7 +46,20 @@ export function buildCan(input: ModelInput): ProductModel {
     const sy = Math.max(-surface.bleed, Math.min(surface.h + surface.bleed, printTop - y));
     return surfaceUV(box, sx, sy);
   };
-  const bodyGeo = revolve(prof, 160, uvBody);
+  // The dome, stand ring and base curve below the print are bare aluminium (the decorator never
+  // reaches them); mapping the art there smeared its bottom row into wedges across the dome.
+  let ring = 0;
+  for (let j = 1; j < prof.length; j++) if (prof[j][0] < prof[ring][0]) ring = j;
+  let cut = ring;
+  while (cut < prof.length - 1 && prof[cut][0] < g.printY0) cut++;
+  const a = prof[cut - 1], b = prof[cut];
+  const tt = (g.printY0 - a[0]) / Math.max(1e-6, b[0] - a[0]);
+  const at: [number, number] = [g.printY0, a[1] + (b[1] - a[1]) * tt];
+  const baseProf: [number, number][] = [...prof.slice(0, cut), at];
+  const printProf: [number, number][] = [at, ...prof.slice(cut)];
+  const bodyGeo = revolve(printProf, 160, uvBody);
+  const baseMat = new MeshPhysicalMaterial({ color: new Color('#c8cbd0'), metalness: 1, roughness: 0.28, anisotropy: 0.3, side: FrontSide });
+  bag.mesh(revolve(baseProf, 120), baseMat, group);
   const body = printMaterial({ side: FrontSide, bumpScale: 1.2 });
   if (bool(o, 'condensation')) {
     const owned: Texture[] = [];
@@ -54,16 +69,27 @@ export function buildCan(input: ModelInput): ProductModel {
   bag.mesh(bodyGeo, body, group);
 
   // Double seam + countersunk lid.
-  const lidProf: [number, number][] = [
-    [neckTop - mm(0.1), rNeck], [g.H - g.rimH, rEnd - mm(0.3)], [g.H - g.rimH + mm(0.6), rEnd], [g.H - mm(0.6), rEnd], [g.H, rEnd - mm(0.5)],
-    [g.H - mm(0.3), rEnd - mm(1.2)], [g.H - mm(1.2), rEnd - mm(1.5)], [g.H - mm(5.6), rEnd - mm(2.2)], [g.H - mm(6.2), rEnd - mm(3.1)], [g.H - mm(5.7), rEnd - mm(4.2)],
-    [g.H - mm(5.5), rEnd * 0.6], [g.H - mm(5.4), 0],
-  ];
+  // Double seam: a rounded bead rolled over the end of the neck, then the chuck wall down into
+  // the countersink, and the centre panel with a shallow reinforcing ring.
+  const lidProf: [number, number][] = [[neckTop - mm(0.1), rNeck], [g.H - g.rimH, rEnd - mm(0.35)]];
+  const beadR = mm(1.05), beadY = g.H - beadR, beadX = rEnd - beadR;
+  for (let i = 0; i <= 14; i++) {
+    const a = -Math.PI / 2 + (i / 14) * (Math.PI * 1.25);
+    lidProf.push([beadY + beadR * Math.sin(a) * (a < 0 ? 1.9 : 1), beadX + beadR * Math.cos(a)]);
+  }
+  lidProf.push(
+    [g.H - mm(1.3), rEnd - mm(1.95)], [g.H - mm(5.3), rEnd - mm(2.25)],
+    [g.H - mm(6.05), rEnd - mm(2.75)], [g.H - mm(6.2), rEnd - mm(3.25)], [g.H - mm(5.85), rEnd - mm(3.85)], [g.H - mm(5.45), rEnd - mm(4.3)],
+    [g.H - mm(5.35), rEnd * 0.72], [g.H - mm(5.6), rEnd * 0.66], [g.H - mm(5.35), rEnd * 0.6], [g.H - mm(5.3), 0],
+  );
   const lidName = str(o, 'lid', 'silver');
   const lidColor = lidName === 'custom' ? str(o, 'lidColor', '#c0392b') : LID[lidName] ?? LID.silver;
-  const lidMat = metalMaterial(lidColor, lidName === 'black' ? 0.35 : 0.24, lidName === 'black' ? 0.6 : 1);
-  if (lidName === 'custom') { lidMat.metalness = 0.75; lidMat.roughness = 0.3; }
-  lidMat.side = DoubleSide;
+  // Spun aluminium end: anisotropic highlights running round the lid (the revolve's u is the
+  // angle, so the tangent follows the circumference).
+  const lidMat = new MeshPhysicalMaterial({
+    color: new Color(lidColor), metalness: lidName === 'black' ? 0.6 : lidName === 'custom' ? 0.75 : 1, roughness: lidName === 'black' ? 0.35 : lidName === 'custom' ? 0.3 : 0.3,
+    anisotropy: lidName === 'black' ? 0.3 : 0.35, anisotropyRotation: 0, clearcoat: lidName === 'custom' || lidName === 'black' ? 0.6 : 0.15, clearcoatRoughness: 0.15, side: DoubleSide,
+  });
   bag.mesh(revolve(lidProf, 96), lidMat, group);
 
   // Stay-on tab: a rounded key shape with a finger hole, plus the rivet and the score.
@@ -81,19 +107,24 @@ export function buildCan(input: ModelInput): ProductModel {
   tabGeo.rotateX(-Math.PI / 2);
   const tabMat = metalMaterial(lidName === 'custom' ? lidColor : lidColor, 0.22);
   const tabMesh = bag.mesh(tabGeo, tabMat, group);
-  tabMesh.position.set(0, g.H - mm(5.2), -mm(2.5));
-  tabMesh.rotation.y = Math.PI;
+  // The opening faces +x (the side it pours from), the stay-on tab behind it.
+  tabMesh.position.set(-mm(2.5), g.H - mm(5.2), 0);
+  tabMesh.rotation.y = -Math.PI / 2;
   const score = new Shape();
   score.absellipse(0, 0, mm(8.5), mm(11), 0, Math.PI * 2, false, 0);
   const scoreGeo = new ExtrudeGeometry(score, { depth: mm(0.05), bevelEnabled: false, curveSegments: 32 });
   scoreGeo.rotateX(-Math.PI / 2);
   const scoreMat = metalMaterial(new Color(lidColor).multiplyScalar(0.82).getStyle(), 0.4);
   const scoreMesh = bag.mesh(scoreGeo, scoreMat, group, false);
-  scoreMesh.position.set(0, g.H - mm(5.42), rEnd * 0.42);
+  scoreMesh.position.set(rEnd * 0.42, g.H - mm(5.42), 0);
 
   const model: ProductModel = {
     group,
-    info: { rollRadius: R },
+    info: {
+      rollRadius: R,
+      dew: { profile: prof, y0: mm(2), y1: wallTop + g.neckH * 0.8, materials: [body] },
+      pour: { mouth: new Vector3(rEnd * 0.5, g.H - mm(4), 0), radius: R, height: g.H, stream: mm(3.4) },
+    },
     pose: () => undefined,
     applyTextures(tex) {
       const t = tex[surface.id];
@@ -103,10 +134,13 @@ export function buildCan(input: ModelInput): ProductModel {
         roughness: varnish === 'matte' ? 0.62 : varnish === 'satin' ? 0.4 : 0.24,
         metalness: bare ? 1 : 0.05,
         clearcoat: varnish === 'gloss' ? 1 : varnish === 'satin' ? 0.4 : 0,
-        mode: bare ? 'metal' : 'opaque', widthPt: box.w, anisotropy: input.anisotropy, maxPx: 2048,
+        mode: bare ? 'metal' : 'opaque', widthPt: box.w, anisotropy: input.anisotropy,
       });
       bag.setComposite('body', c);
       applyComposite(body, c, varnish === 'gloss' ? 0.05 : 0.18);
+      // Drawn-and-ironed aluminium: the grain runs up the wall where the metal shows.
+      body.anisotropy = bare ? 0.55 : 0;
+      body.anisotropyRotation = Math.PI / 2;
       if (bool(o, 'condensation')) { body.roughness = 1; body.clearcoat = 1; body.clearcoatRoughness = 0.05; }
     },
     dispose: () => bag.dispose(),

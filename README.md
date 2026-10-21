@@ -44,6 +44,7 @@ All geometry is in points internally. Fields accept and display mm, cm, in, pt, 
 | | Stand-up pouch | Front and back with a bottom gusset, zipper line and tear notch, on matte, gloss, kraft, metallised or black film. |
 | | Jar label | Wrap label and lid label, with a gold, silver, black, white or wood lid and coloured contents. |
 | Bags | Tote bag | Front and back print areas with gusset and handles, in cotton, canvas or jute, in any fabric colour. |
+| | Paper carrier bag | SOS retail bag from W × G × H: glue flap, gussets with their centre crease, a turn-in top and folded base flaps, twisted rope or flat tape handles, in kraft, white or black paper. Folds up in 3D. |
 | Apparel | T-shirt and hoodie | S–XL, front, back and left-sleeve print areas, fabric colour. Screen print, DTG or embroidery (raised thread relief). |
 | | Cap | Front, side and back panels, brim colour, embroidery or print. |
 | Drinkware | Coffee cup | 8, 12 and 16 oz conical wrap (it unwraps as an annular sector), white, kraft or black board, lid, optional sleeve. |
@@ -73,11 +74,16 @@ Each dieline carries panels (with a role such as front, back, side, lid or band,
 
 ## 3D mockups (`src/three/`)
 
-- Physically based materials: brushed aluminium with a printed or bare-metal wrap; refractive glass with attenuated liquid split at the fill line; paperboard with caliper edges; fabric with weave bump, an inflated ghost-mannequin silhouette and raised embroidery; label stocks; foil (metalness), spot UV (clearcoat) and emboss / deboss (bump) driven from the artwork's finish masks.
+- Physically based materials: aluminium with a printed or bare-metal wrap (anisotropic grain, a spun anisotropic lid), refractive glass with a punt, a thick base and the drink inside with a meniscus, paper-backed labels; paperboard and kraft with fibre normal maps, cut edges and rounded creases, and gloss, matte, soft-touch and uncoated coatings that look different; pouches with crimped seals, a zipper bead and cut tear notches; fabric with jersey, fleece and canvas weave normal maps and sheen; foil (metalness), spot UV (clearcoat) and emboss / deboss (bump) driven from the artwork's finish masks.
+- T-shirt, hoodie and tote are cloth-simulated in Blender (`tools/blender/cloth.py`), with the print areas mapped from the flat pattern. The garments hang on an invisible ghost-mannequin form with a body-deep chest (about 19–20 cm), hollow at the neck, cuffs and hem.
+- Studio lighting from HDRIs baked in Blender (`tools/blender/studio_hdri.py` → `public/env`): soft studio, strip lights and daylight (or *Auto*, following the lighting preset), turned with the key light; Neutral, AgX or ACES tone mapping.
+- Art is re-rasterised for the view as the camera comes closer (and before every still and video), so type stays sharp in close-ups. The camera cannot be zoomed into a product, and the clip planes hug the shot so nothing fights for depth.
+- *Refreshing* for cans, bottles and cups: condensation (droplets of mixed sizes that refract the print and catch the highlights, frost haze, running drips; amount, size, frost, drips), ice cubes on the floor and a bed of crushed ice (Blender-made, `tools/blender/ice.py`), and a glass on set with cola, lager, juice, water or sparkling water and ice.
 - Folding cartons are built from the dieline's hinge tree and fold up live (a Fold slider, or the *Fold up* animation).
 - Lighting presets (studio, soft box, window, golden hour, dramatic, top-down, overcast, gallery, night) with key, warmth and exposure. Backdrops: studio sweep, solid, gradient, oak table, linen, concrete, paper, marble, felt or transparent. Contact shadows.
 - Show one product or the whole range as a line-up. Orbit camera, reset, auto-framing for any aspect.
-- Animations: turntable, hero orbit, roll in (cans and other cylinders), fold up (cartons), slide open (sleeve), open lid, card flip, sway, float and push in, with speed, looping and a time scrubber.
+- Animations: turntable, hero orbit, roll in (cans and other cylinders), fold up (cartons), slide open (sleeve), open lid, card flip, sway, float, push in, *Pour* (the can or bottle tilts over the glass: a flowing stream, the level rising with a meniscus, bubbles, a foam head for beer, a splash) and *Fizz* (an idle beside the full glass), with speed, looping and a time scrubber; a Pour slider poses a mid-pour still.
+- *Photo (path-traced)*: renders the current shot with [three-gpu-pathtracer](https://github.com/gkjohnson/three-gpu-pathtracer) under the same HDRI, for real refraction through glass, drinks and ice, real water drops for condensation and soft studio shadows. It accumulates 32 to 1024 samples with progress, time left and Cancel. A guided filter then removes the remaining grain, using the albedo, normals and depth of the same view so print and type stay sharp. The live view stays rasterised. On an Apple M1 at 1600 × 1200 and 128 samples, a single product takes about 1.5 to 3 minutes; a pour or a can on crushed ice takes 5 to 7 minutes.
 - Stills up to 4096 px (PNG with alpha on a transparent backdrop). Video renders frame by frame and encodes in the browser: MP4 (H.264 via WebCodecs with a MediaRecorder fallback), WebM (VP9 / VP8, with alpha where supported) and GIF, in landscape 3:2, wide 16:9, portrait 4:5, square or story 9:16.
 
 ## Export (`src/export/`)
@@ -106,7 +112,7 @@ src/
 
 The same display list renders the SVG editor, the Canvas textures for 3D and PNG, and the PDF, so all three agree.
 
-Stack: Vite 6, React 18, TypeScript (strict), Tailwind CSS v4, zustand + immer, three.js, pdf-lib + @pdf-lib/fontkit, mp4-muxer, webm-muxer, gifenc and lucide-react.
+Stack: Vite 6, React 18, TypeScript (strict), Tailwind CSS v4, zustand + immer, three.js, three-gpu-pathtracer, pdf-lib + @pdf-lib/fontkit, mp4-muxer, webm-muxer, gifenc and lucide-react.
 
 ## Keyboard
 
@@ -132,7 +138,9 @@ The bundled fonts in `public/fonts` are under the SIL Open Font License 1.1 (lic
 - Pantone references are approximations for naming and proofing, not licensed colour data. Confirm spot colours with your printer.
 - Dielines are accurate parametric templates for design and proofing. Check them against your converter's die before production.
 - The bottle neck label is designed flat, and text on it is not set along the arc.
-- Apparel is an inflated ghost-mannequin silhouette, not a cloth simulation.
+- Apparel and the tote use one cloth simulation per product (size M), scaled for other sizes and bag dimensions. The hoodie's shoulders are a little square.
+- In the live view, liquids, glass and ice use three.js's screen-space transmission. Refraction is approximate, a glass shows what is behind it rather than a second, far wall, and ice on a white set reads more frosted than clear. *Photo* traces them properly.
+- *Photo* runs on the GPU in the page. Glass and ice keep a little fine grain at 128 samples. Micro-relief normal maps (knit, weave, paper tooth) are left out of photos, because the tracer samples textures without mipmaps. three-gpu-pathtracer's WebGL renderer is pinned at 0.0.24: newer releases need three.js r185 and move to WebGPU.
 
 ## Licence
 

@@ -24,7 +24,7 @@ export interface BackdropOptions {
 }
 
 export type AnimationMode =
-  | 'none' | 'turntable' | 'hero' | 'roll' | 'float' | 'reveal' | 'fold' | 'slide' | 'sway' | 'spin' | 'open';
+  | 'none' | 'turntable' | 'hero' | 'roll' | 'float' | 'reveal' | 'fold' | 'slide' | 'sway' | 'spin' | 'open' | 'pour' | 'fizz';
 
 export interface AnimationOptions {
   /** Seconds (defaults per mode). */
@@ -38,6 +38,8 @@ export interface AnimationInfo {
   duration: number;
   description: string;
 }
+
+export type ToneMappingId = 'neutral' | 'agx' | 'aces';
 
 export interface CameraOptions {
   /** Vertical field of view, degrees 15–75. */

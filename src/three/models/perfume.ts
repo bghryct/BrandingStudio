@@ -13,7 +13,9 @@ import { num, str } from '../../products/types';
 import { glassMaterial, liquidGlassMaterial, metalMaterial, printMaterial, revolve, surfaceUV, bleedBox, CAP_COLORS, type GlassKind } from '../build';
 import { compose, applyComposite } from '../finishing';
 import { Bag, type ModelInput, type ProductModel } from './common';
-import { labelPatch } from './bottle';
+import { labelPatch, labelMeshes } from './bottle';
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import type { MeshStandardMaterial } from 'three';
 
 type Footprint = (inset: number) => [number, number][];
 
@@ -36,8 +38,8 @@ function octagonFootprint(W: number): Footprint {
   };
 }
 
-/** Loft a footprint over rows [y, inset], capped at both ends; normals face outward. */
-function loft(fp: Footprint, rowsIn: [number, number][], flat: boolean): BufferGeometry {
+/** Loft a footprint over rows [y, inset], capped at either end; normals face outward. */
+function loft(fp: Footprint, rowsIn: [number, number][], flat: boolean, capBottom = true, capTop = true): BufferGeometry {
   const rings = rowsIn.map(([y, inset]) => fp(inset).map(([x, z]) => [x, y, z] as [number, number, number]));
   const n = rings[0].length;
   const pos: number[] = [];
@@ -51,7 +53,10 @@ function loft(fp: Footprint, rowsIn: [number, number][], flat: boolean): BufferG
     idx.push(a, c, b, a, d, c);
   }
   const last = (rings.length - 1) * n;
-  for (let i = 0; i < n; i++) { idx.push(cb, i, (i + 1) % n); idx.push(ct, last + ((i + 1) % n), last + i); }
+  for (let i = 0; i < n; i++) {
+    if (capBottom) idx.push(cb, i, (i + 1) % n);
+    if (capTop) idx.push(ct, last + ((i + 1) % n), last + i);
+  }
   let g = new BufferGeometry();
   g.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
   g.setIndex(idx);
@@ -93,6 +98,10 @@ export function buildPerfume(input: ModelInput): ProductModel {
   gm.thickness = mm(14);
   const rr = Math.min(g.round, mm(6));
 
+  // Three bands of one solid: the thick glass base, the fragrance, and the empty glass above it.
+  // Only the outside bottom, the liquid surface and the top are capped, so no two faces share a
+  // plane at the fill line (they used to fight there).
+  const baseGlass = glassMaterial(glass, mm(9), input.scale);
   if (g.shape === 'round') {
     const R = g.W / 2, re = g.round;
     const prof: [number, number][] = [[0, 0], [0, R - re]];
@@ -101,15 +110,21 @@ export function buildPerfume(input: ModelInput): ProductModel {
     for (let i = 1; i <= 8; i++) { const a = (i / 8) * (Math.PI / 2); prof.push([g.H - re + re * Math.sin(a), R - re * (1 - Math.cos(a))]); }
     prof.push([g.H, 0]);
     const rAt = (y: number) => { for (let i = 0; i < prof.length - 1; i++) if (y >= prof[i][0] && y <= prof[i + 1][0] && prof[i + 1][0] > prof[i][0]) return prof[i][1] + ((prof[i + 1][1] - prof[i][1]) * (y - prof[i][0])) / (prof[i + 1][0] - prof[i][0]); return R; };
-    const lower = [...prof.filter(([y]) => y < yL), [yL, rAt(yL)] as [number, number], [yL, 0] as [number, number]];
-    const upper = [[yL, 0] as [number, number], [yL, rAt(yL)] as [number, number], ...prof.filter(([y]) => y > yL)];
-    bag.mesh(revolve(lower, 96), lm, group);
+    const at = (y: number): [number, number] => [y, rAt(y)];
+    const bottom = [...prof.filter(([y]) => y < base), at(base)];
+    const fluid = [at(base), ...prof.filter(([y]) => y > base && y < yL), at(yL), [yL + mm(0.4), rAt(yL) * 0.8] as [number, number], [yL + mm(0.5), 0] as [number, number]];
+    const upper = [at(yL), ...prof.filter(([y]) => y > yL)];
+    bag.mesh(revolve(bottom, 96), baseGlass, group);
+    bag.mesh(revolve(fluid, 96), lm, group);
     bag.mesh(revolve(upper, 96), gm, group);
   } else {
     const fp = g.shape === 'faceted' ? octagonFootprint(g.W) : roundedRectFootprint(g.W, g.D, rr);
     const rad = g.shape === 'faceted' ? mm(1.5) : mm(3.5);
-    bag.mesh(loft(fp, rows(0, yL, rad, true, false), g.shape === 'faceted'), lm, group);
-    bag.mesh(loft(fp, rows(yL, g.H, rad, false, true), g.shape === 'faceted'), gm, group);
+    const flat = g.shape === 'faceted';
+    const lowRows = rows(0, yL, rad, true, false);
+    bag.mesh(loft(fp, lowRows.filter(([y]) => y <= base).concat([[base, 0]]), flat, true, false), baseGlass, group);
+    bag.mesh(loft(fp, [[base, 0] as [number, number], ...lowRows.filter(([y]) => y > base)], flat, false, true), lm, group);
+    bag.mesh(loft(fp, rows(yL, g.H, rad, false, true), flat, false, true), gm, group);
   }
 
   // Collar, pump and dip tube.
@@ -127,7 +142,16 @@ export function buildPerfume(input: ModelInput): ProductModel {
   let capGeo: BufferGeometry;
   const s = Math.min(g.W * 0.55, mm(34));
   switch (capKind) {
-    case 'cylinder': capGeo = new CylinderGeometry(g.collarD * 0.95, g.collarD * 0.95, mm(26), 64).translate(0, y0 + mm(13), 0); break;
+    case 'cylinder': {
+      // Turned cylinder with eased edges.
+      const r = g.collarD * 0.95, h = mm(26), e = mm(2);
+      const pts: Vector2[] = [new Vector2(0.01, 0)];
+      for (let i = 0; i <= 6; i++) { const a = (i / 6) * (Math.PI / 2); pts.push(new Vector2(r - e + e * Math.sin(a), e - e * Math.cos(a))); }
+      for (let i = 0; i <= 6; i++) { const a = (i / 6) * (Math.PI / 2); pts.push(new Vector2(r - e + e * Math.cos(a), h - e + e * Math.sin(a))); }
+      pts.push(new Vector2(0.01, h));
+      capGeo = new LatheGeometry(pts, 72).translate(0, y0, 0);
+      break;
+    }
     case 'sphere': capGeo = new SphereGeometry(mm(17), 64, 48).translate(0, y0 + mm(15), 0); break;
     case 'tall': capGeo = new CylinderGeometry(g.collarD * 0.62, g.collarD * 0.7, mm(50), 48).translate(0, y0 + mm(25), 0); break;
     case 'faceted': {
@@ -137,13 +161,13 @@ export function buildPerfume(input: ModelInput): ProductModel {
       capGeo.translate(0, y0, 0);
       break;
     }
-    default: capGeo = new BoxGeometry(s, s, s * (g.shape === 'rect' ? Math.min(1, g.D / g.W + 0.25) : 1)).translate(0, y0 + s / 2, 0);
+    default: capGeo = new RoundedBoxGeometry(s, s, s * (g.shape === 'rect' ? Math.min(1, g.D / g.W + 0.25) : 1), 4, mm(1.6)).translate(0, y0 + s / 2, 0);
   }
   bag.mesh(capGeo, capMat, group);
 
   // Decoration.
   const decoKind = str(o, 'deco', 'label');
-  const decos: { id: string; mat: MeshPhysicalMaterial }[] = [];
+  const decos: { id: string; mat: MeshPhysicalMaterial; back: MeshStandardMaterial | null }[] = [];
   for (const sid of ['front', 'back']) {
     const s2 = input.dieline.surfaces.find((x) => x.id === sid);
     if (!s2) continue;
@@ -163,8 +187,14 @@ export function buildPerfume(input: ModelInput): ProductModel {
       geo.translate(0, g.decoY + g.decoH / 2, zf);
       if (sid === 'back') geo.rotateY(Math.PI);
     }
-    bag.mesh(geo, mat, group, decoKind === 'label');
-    decos.push({ id: sid, mat });
+    if (decoKind === 'label') {
+      mat.dispose();
+      const lm2 = labelMeshes(bag, geo, group, 'white', s2);
+      decos.push({ id: sid, mat: lm2.mat, back: lm2.back });
+    } else {
+      bag.mesh(geo, mat, group, false);
+      decos.push({ id: sid, mat, back: null });
+    }
   }
 
   return {
@@ -182,7 +212,11 @@ export function buildPerfume(input: ModelInput): ProductModel {
         });
         bag.setComposite(d.id, c);
         applyComposite(d.mat, c);
-        if (decoKind === 'etched') { d.mat.map = null; d.mat.color.set('#eef3f4'); d.mat.opacity = 0.75; d.mat.needsUpdate = true; }
+        // Ink and frosting are cut out (alpha test / hash) rather than blended, so they render with
+        // the opaque objects and show through the glass from the other side as well.
+        if (decoKind !== 'label') { d.mat.transparent = false; d.mat.alphaTest = decoKind === 'screen' ? 0.5 : 0; d.mat.alphaHash = decoKind === 'etched'; }
+        if (decoKind === 'etched') { d.mat.map = null; d.mat.color.set('#eef3f4'); d.mat.opacity = 0.75; d.mat.roughness = 1; }
+        d.mat.needsUpdate = true;
       }
     },
     dispose: () => bag.dispose(),

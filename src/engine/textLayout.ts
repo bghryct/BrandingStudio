@@ -536,6 +536,35 @@ function breakLines(items: Item[], widthAt: (line: number) => number, hyphenLimi
   return knuthPlass(items, widthAt, 2, hyphenLimit) ?? knuthPlass(items, widthAt, 8, hyphenLimit) ?? knuthPlass(items, widthAt, 8) ?? greedy(items, widthAt);
 }
 
+/*
+ * Per-paragraph caches, so an edit re-sets only the paragraphs it touched: the measured items of
+ * a paragraph (by its words, style and context) and its line breaks (by items and line widths).
+ */
+const itemCache = new Map<string, Item[]>();
+const ctxIds = new Map<string, number>();
+const styleJson = new WeakMap<object, string>();
+const jsonOf = (o: object) => { let j = styleJson.get(o); if (j == null) { j = JSON.stringify(o); styleJson.set(o, j); } return j; };
+const breakCache = new WeakMap<Item[], Map<string, { breaks: number[]; widths: number[] }>>();
+
+function cachedBreaks(items: Item[], widthAt: (ln: number) => number, hyphenLimit: number): number[] {
+  // Line widths over the lines the paragraph is likely to need form the key; a hit is checked
+  // against the widths of every line it actually set.
+  let natural = 0;
+  for (const it of items) if (it.t === 'box' || it.t === 'glue') natural += it.w;
+  const est = Math.min(3000, Math.ceil(natural / Math.max(1, widthAt(0))) + 3);
+  const ws: number[] = [];
+  for (let ln = 0; ln < est; ln++) ws.push(Math.round(widthAt(ln) * 100) / 100);
+  const key = `${hyphenLimit}|${ws.join(',')}`;
+  let m = breakCache.get(items);
+  const hit = m?.get(key);
+  if (hit && hit.widths.every((w, ln) => Math.abs(w - widthAt(ln)) < 0.01)) return hit.breaks;
+  const breaks = breakLines(items, widthAt, hyphenLimit);
+  if (!m) { m = new Map(); breakCache.set(items, m); }
+  if (m.size > 6) m.clear();
+  m.set(key, { breaks, widths: breaks.map((_, ln) => widthAt(ln)) });
+  return breaks;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Line assembly                                                               */
 /* -------------------------------------------------------------------------- */
@@ -687,10 +716,15 @@ function styleKey(s: TextStyle) {
 }
 
 function prepare(text: string, style: TextStyle, firstWidth: number, styles: StoryStyles | null): Prepared {
-  const key = `${useFontStore.getState().version}|${styleKey(style)}|${Math.round(firstWidth)}|${styles ? JSON.stringify(styles) : ''}|${text}`;
+  const sk = styles ? JSON.stringify(styles) : '';
+  const key = `${useFontStore.getState().version}|${styleKey(style)}|${Math.round(firstWidth)}|${sk}|${text}`;
   const hit = storyCache.get(key);
   if (hit) return hit;
   const paras = parseStory(text, style, styles);
+  // Context of the measured items: loaded fonts (and hyphenation patterns) and the project's styles.
+  const ctxKey = `${useFontStore.getState().version}|${sk}`;
+  let ctxId = ctxIds.get(ctxKey);
+  if (ctxId == null) { ctxId = ctxIds.size + 1; ctxIds.set(ctxKey, ctxId); }
 
   // Drop cap: take the first letter (plus an opening quote) of the first body paragraph.
   let dropCap: DropCapInfo | null = null;
@@ -728,7 +762,13 @@ function prepare(text: string, style: TextStyle, firstWidth: number, styles: Sto
     const ps = paraStyle(para, pst);
     if (dropCap && i === 0) ps.indent = 0;
     const ragged = ps.align === 'left' || ps.align === 'right' || ps.align === 'center';
-    let items = buildItems(para, pst, ps, 0, ragged);
+    const special = i === 0 && (!!dropCap || style.firstLineSmallCaps);
+    const ik = special ? '' : `${ctxId}|${jsonOf(pst)}|${para.kind}|${para.first}|${JSON.stringify(para.words)}`;
+    let items = special ? undefined : itemCache.get(ik);
+    if (!items) {
+      items = buildItems(para, pst, ps, 0, ragged);
+      if (!special) { itemCache.set(ik, items); if (itemCache.size > 30000) itemCache.delete(itemCache.keys().next().value!); }
+    }
     if (i === 0 && style.firstLineSmallCaps && para.kind === 'body') {
       // Iterate: set the words of line one in small caps until the line is stable.
       let scCount = 0;
@@ -824,7 +864,9 @@ function layoutFrame(prep: Prepared, style: TextStyle, frame: FrameSpec, cursor:
     // Left / right indents, and a hanging (negative) first-line indent on the paragraph's first line.
     const hang = startsPara ? Math.min(0, ps.indent) : 0;
     const widthAt = (ln: number) => (ln < indentLines ? colW - indentW : colW) - ps.left - ps.right - (ln === 0 ? hang : 0);
-    const lines = linesFromBreaks(items, breakLines(items, widthAt, pp.para.style.hyphenLimit ?? 0), 0);
+    const hl = pp.para.style.hyphenLimit ?? 0;
+    // Whole paragraphs without an initial reuse their breaks while the column widths stay the same.
+    const lines = linesFromBreaks(items, startsPara && !dc ? cachedBreaks(items, widthAt, hl) : breakLines(items, widthAt, hl), 0);
 
     if (y != null && startsPara) y += gridRound(ps.spaceBefore, grid);
 

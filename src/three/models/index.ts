@@ -15,7 +15,7 @@ export function buildModel(input: ModelInput): ProductModel {
     case 'can': return buildCan(input);
     case 'bottle': return buildBottle(input);
     case 'perfume': return buildPerfume(input);
-    case 'tuck-reverse': case 'tuck-straight': case 'mailer': case 'sleeve': return buildCarton(input);
+    case 'tuck-reverse': case 'tuck-straight': case 'mailer': case 'sleeve': case 'paper-bag': return buildCarton(input);
     case 'pillow': return buildPillow(input);
     case 'tube': return buildTube(input);
     case 'pouch': return buildPouch(input);

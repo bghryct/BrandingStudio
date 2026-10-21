@@ -379,8 +379,10 @@ function sleeve(o: Opts): Dieline {
     node('glue', glueFlap(0, 0, g, D, 'left'), 'top', H(xTop, D, xTop, 0), 91.5, [0.5, 0.9]),
   ];
   const panels = [
-    panel('top', 'Top (front)', xTop, 0, L, D, 'face'), panel('edge-r', 'Right edge', xEdgeR, 0, W, D, 'side'),
-    panel('bottom', 'Bottom (back)', xBottom, 0, L, D, 'face'), panel('edge-l', 'Left edge', xEdgeL, 0, W, D, 'side'),
+    // The edges turn down (right) and up (left) from the top panel: their art reads sideways,
+    // opposite ways round, so both read upright on the finished sleeve.
+    panel('top', 'Top (front)', xTop, 0, L, D, 'face'), panel('edge-r', 'Right edge', xEdgeR, 0, W, D, 'side', mm(3), { read: 270 }),
+    panel('bottom', 'Bottom (back)', xBottom, 0, L, D, 'face'), panel('edge-l', 'Left edge', xEdgeL, 0, W, D, 'side', mm(3), { read: 90 }),
     panel('glue', 'Glue flap', 0, 0, g, D, 'glue', 0),
   ];
   const folds = [xTop, xEdgeR, xBottom, xEdgeL].map((x) => fold(x, 0, x, D));
@@ -412,4 +414,102 @@ export const SLEEVE_TEMPLATE: ProductTemplate = {
   ],
   dieline: sleeve,
   animations: ['fold', 'slide', 'turntable', 'hero'],
+};
+
+/* -------------------------------------------------------------------------- */
+/* Paper carrier bag                                                           */
+/* -------------------------------------------------------------------------- */
+
+export const BAG_PAPERS = [
+  { value: 'kraft', label: 'Brown kraft (100 g)' },
+  { value: 'sbs', label: 'White kraft (120 g)' },
+  { value: 'black', label: 'Black paper (150 g)' },
+];
+
+/**
+ * Self-opening (SOS) paper carrier bag from width × gusset × height: glue flap | front | gusset |
+ * back | gusset, a top turn-in that folds inside (it carries the handles), and the bottom flaps
+ * that fold under to close the base. The gussets crease down their middle when the bag lies flat.
+ */
+export function paperBag(o: Opts): Dieline {
+  const W = num(o, 'width', mm(240)), G = num(o, 'gusset', mm(110)), Hh = num(o, 'height', mm(310));
+  const board = boardOf(o);
+  const g = mm(18); // glue flap
+  const T = Math.min(mm(45), Hh * 0.2); // top turn-in
+  const B = G * 0.75; // bottom flaps
+  const xFront = g, xGr = g + W, xBack = g + W + G, xGl = g + 2 * W + G;
+  const y0 = T, y1 = T + Hh;
+  const nodes: NetNode[] = [];
+  const panels: DielinePanel[] = [];
+  const folds: FoldLine[] = [];
+  const zones: Zone[] = [];
+  // Body: front (root), right gusset, back, left gusset; the glue flap tucks inside the left gusset.
+  nodes.push(node('front', rectPoly(xFront, y0, W, Hh), null, null, 0, [0, 0]));
+  nodes.push(node('gusset-r', rectPoly(xGr, y0, G, Hh), 'front', H(xGr, y0, xGr, y1), 90, [0, 0.3]));
+  nodes.push(node('back', rectPoly(xBack, y0, W, Hh), 'gusset-r', H(xBack, y0, xBack, y1), 90, [0.08, 0.38]));
+  nodes.push(node('gusset-l', rectPoly(xGl, y0, G, Hh), 'back', H(xGl, y0, xGl, y1), 90, [0.16, 0.46]));
+  nodes.push(node('glue', glueFlap(0, y0, g, Hh, 'left'), 'front', H(xFront, y1, xFront, y0), 92, [0.2, 0.5]));
+  // Top turn-ins fold right over to the inside.
+  for (const [id, x, w, parent] of [['front', xFront, W, 'front'], ['gusset-r', xGr, G, 'gusset-r'], ['back', xBack, W, 'back'], ['gusset-l', xGl, G, 'gusset-l']] as const) {
+    nodes.push(node(`tuck-${id}`, rectPoly(x + mm(0.5), 0, w - mm(1), T), parent, H(x + w, y0, x, y0), 178, [0.5, 0.66]));
+    folds.push(fold(x, y0, x + w, y0, 'reverse'));
+  }
+  // Base: the front and back flaps meet under the bag; the gusset flaps fold in first.
+  nodes.push(node('dust-gr', rectPoly(xGr + mm(0.5), y1, G - mm(1), G * 0.48), 'gusset-r', H(xGr, y1, xGr + G, y1), 90, [0.62, 0.74]));
+  nodes.push(node('dust-gl', rectPoly(xGl + mm(0.5), y1, G - mm(1), G * 0.48), 'gusset-l', H(xGl, y1, xGl + G, y1), 90, [0.62, 0.74]));
+  nodes.push(node('base-back', rectPoly(xBack, y1, W, G * 0.55), 'back', H(xBack, y1, xBack + W, y1), 90, [0.72, 0.86]));
+  nodes.push(node('base-front', rectPoly(xFront, y1, W, B), 'front', H(xFront, y1, xFront + W, y1), 92, [0.82, 0.98]));
+  for (const x of [xFront, xGr, xBack, xGl]) folds.push(fold(x, y0, x, y1));
+  // The gussets' bellows crease (folds flat) and the base creases.
+  for (const x of [xGr, xGl]) folds.push(fold(x + G / 2, y0, x + G / 2, y1, 'reverse'), fold(x + G / 2, y1, x, y1 + G / 2, 'crease'), fold(x + G / 2, y1, x + G, y1 + G / 2, 'crease'));
+  folds.push(fold(0, y1, xGl + G, y1));
+  panels.push(
+    panel('front', 'Front', xFront, y0, W, Hh, 'face', mm(10)),
+    panel('gusset-r', 'Right gusset', xGr, y0, G, Hh, 'side', mm(8)),
+    panel('back', 'Back', xBack, y0, W, Hh, 'face', mm(10)),
+    panel('gusset-l', 'Left gusset', xGl, y0, G, Hh, 'side', mm(8)),
+    panel('glue', 'Glue flap', 0, y0, g, Hh, 'glue', 0),
+    panel('turn-in', 'Top turn-in (inside)', 0, 0, xGl + G, T, 'tuck', 0),
+    panel('base', 'Base flaps', 0, y1, xGl + G, B, 'tuck', 0),
+  );
+  zones.push(zone('glue', 'Glue', glueFlap(0, y0, g, Hh, 'left')));
+  zones.push(zone('nonprint', 'Turn-in (inside the bag)', rectPoly(0, 0, xGl + G, T)));
+  const n = normalise(nodes, panels, folds, zones);
+  return {
+    surfaces: [{
+      id: 'outside', label: 'Paper bag', w: n.w, h: n.h, bleed: mm(3),
+      cut: n.nodes.map((x) => x.poly), cutKind: 'die', folds: n.folds, panels: n.panels, zones: n.zones,
+      dims: [
+        dim(xFront + n.dx, y1 + B + n.dy, xFront + W + n.dx, y1 + B + n.dy, mm(9), `W ${fmtMm(W)}`),
+        dim(xGr + n.dx, y1 + B + n.dy, xGr + G + n.dx, y1 + B + n.dy, mm(9), `G ${fmtMm(G)}`),
+        dim(xGl + G + n.dx, y0 + n.dy, xGl + G + n.dx, y1 + n.dy, mm(9), `H ${fmtMm(Hh)}`),
+      ],
+      substrate: board.outside, defaultGround: board.value === 'kraft' ? null : board.value === 'black' ? null : '#ffffff', net: n.nodes,
+      notes: ['The turn-in folds inside at the top and carries the handles; the base flaps fold under. Keep copy clear of the gussets’ centre crease.'],
+    }],
+    specs: [
+      { label: 'Style', value: 'SOS carrier bag with turn-in top' },
+      { label: 'W × G × H', value: `${fmtMm(W)} × ${fmtMm(G)} × ${fmtMm(Hh)}` },
+      { label: 'Flat sheet', value: `${fmtMm(n.w)} × ${fmtMm(n.h)}` },
+      { label: 'Paper', value: BAG_PAPERS.find((p) => p.value === board.value)?.label ?? board.label },
+    ],
+  };
+}
+
+export const PAPER_BAG_TEMPLATE: ProductTemplate = {
+  id: 'paper-bag',
+  name: 'Paper carrier bag',
+  category: 'Bags',
+  description: 'Retail paper bag (SOS) with gussets, a turn-in top, twisted or flat paper handles and a folded base.',
+  options: [
+    { key: 'width', label: 'Width (W)', group: 'Size', kind: 'length', default: mm(240), min: mm(120), max: mm(500) },
+    { key: 'gusset', label: 'Gusset (G)', group: 'Size', kind: 'length', default: mm(110), min: mm(50), max: mm(250) },
+    { key: 'height', label: 'Height (H)', group: 'Size', kind: 'length', default: mm(310), min: mm(150), max: mm(600) },
+    { key: 'board', label: 'Paper', group: 'Material', kind: 'select', default: 'kraft', choices: BAG_PAPERS },
+    { key: 'handles', label: 'Handles', group: 'Construction', kind: 'select', default: 'twisted', choices: [{ value: 'twisted', label: 'Twisted paper rope' }, { value: 'flat', label: 'Flat paper tape' }, { value: 'none', label: 'None' }] },
+    { key: 'handleColor', label: 'Handle colour', group: 'Construction', kind: 'color', default: '#a47b4f', when: (o) => o.handles !== 'none' },
+    FINISH_OPTION,
+  ],
+  dieline: paperBag,
+  animations: ['fold', 'turntable', 'sway', 'hero', 'float'],
 };

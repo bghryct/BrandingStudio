@@ -9,7 +9,8 @@ import { str } from '../../products/types';
 import { flatShape, grid, printMaterial, surfaceUV, bleedBox } from '../build';
 import { compose, applyComposite, installDetailBump, detailUniforms } from '../finishing';
 import { Bag, type ModelInput, type ProductModel } from './common';
-import type { Texture } from 'three';
+import { Vector2, type Texture } from 'three';
+import { tiledNormal } from '../assets';
 
 const FINISH: Record<string, { rough: number; cc: number; sheen: number }> = {
   uncoated: { rough: 0.9, cc: 0, sheen: 0 }, matte: { rough: 0.7, cc: 0, sheen: 0 }, 'soft-touch': { rough: 0.92, cc: 0, sheen: 0.35 }, gloss: { rough: 0.3, cc: 1, sheen: 0 },
@@ -60,10 +61,14 @@ export function buildCard(input: ModelInput): ProductModel {
   const bc = makeCard();
   bc.rotation.y = Math.PI; // turned over: its back faces up
   b.add(bc);
-  a.position.set(-g.w * 0.28, T / 2, g.h * 0.12);
+  // The second card lies on the floor, the first rests on top of it where they overlap (they used
+  // to share a plane there and z-fight).
+  const aY = T * 1.5 + mm(0.05);
+  a.position.set(-g.w * 0.28, aY, g.h * 0.12);
   a.rotation.y = 0.18;
   b.position.set(g.w * 0.42, T / 2, -g.h * 0.32);
   b.rotation.y = -0.22;
+  for (const m of [fm, bm]) { m.normalMap = bag.texture(tiledNormal('paper', g.w / mm(18), g.h / mm(18))); m.normalScale = new Vector2(0.25, 0.25); }
   group.add(a, b);
   return {
     group,
@@ -71,7 +76,7 @@ export function buildCard(input: ModelInput): ProductModel {
     pose({ open }) {
       // "Spin": the front card lifts and flips over its long axis.
       const t = Math.max(0, Math.min(1, open));
-      a.position.y = T / 2 + Math.sin(Math.PI * t) * g.h * 0.55;
+      a.position.y = aY + Math.sin(Math.PI * t) * g.h * 0.55;
       a.rotation.z = t * Math.PI * 2;
     },
     applyTextures(tex) {
@@ -98,12 +103,28 @@ export function buildLetterhead(input: ModelInput): ProductModel {
     return { x: (u - 0.5) * W, y: (0.5 - v) * H, z: curl + Math.sin(u * Math.PI) * mm(1.5), uv: surfaceUV(box, u * W, v * H) };
   });
   const mat = printMaterial({ side: DoubleSide, bumpScale: 0.4 });
+  mat.normalMap = bag.texture(tiledNormal('paper', W / mm(20), H / mm(20)));
+  mat.normalScale = new Vector2(0.3, 0.3);
   const owned: Texture[] = [];
   installDetailBump(mat, detailUniforms('tooth', W / mm(8), H / mm(8), 0.35, input.anisotropy, owned), 'sheet-tooth');
   owned.forEach((t) => bag.texture(t));
   const sheet = bag.mesh(geo, mat, group);
   sheet.rotation.x = -Math.PI / 2;
-  sheet.position.y = mm(0.2);
+  sheet.position.y = mm(0.45);
+  // A few blank sheets under it, a touch askew: the stack's edges and the shadow between the
+  // sheets give the paper its thickness.
+  const plain = new MeshStandardMaterial({ color: new Color(stock.color), roughness: 0.9, side: DoubleSide });
+  plain.normalMap = mat.normalMap;
+  plain.normalScale = new Vector2(0.25, 0.25);
+  bag.add(plain);
+  for (const [k, rot, dx, dz] of [[1, 0.035, mm(3), mm(-2)], [2, -0.025, mm(-2), mm(2.5)]] as const) {
+    const under = new ExtrudeGeometry(new Shape([[-W / 2, -H / 2], [W / 2, -H / 2], [W / 2, H / 2], [-W / 2, H / 2]].map(([x, y]) => ({ x, y })) as never), { depth: mm(0.1), bevelEnabled: false });
+    under.rotateX(-Math.PI / 2);
+    const m = bag.mesh(under, plain, group);
+    m.position.set(dx, mm(0.45) - k * mm(0.14), dz);
+    m.rotation.y = rot;
+    m.castShadow = true;
+  }
   return {
     group,
     info: { lying: true },

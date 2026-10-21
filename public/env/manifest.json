@@ -1,0 +1,50 @@
+{
+ "studio-soft": {
+  "file": "env/studio-soft.hdr",
+  "keyDirection": [
+   -0.5965,
+   0.5583,
+   0.5766
+  ],
+  "brightestPx": [
+   1797.0,
+   318.4
+  ],
+  "maxRadiance": 15.96,
+  "meanRadiance": 0.915,
+  "exposure": 1.0,
+  "description": "Soft studio: big front-left key softbox, fill, overhead box, rim strips, light grey sweep."
+ },
+ "studio-strip": {
+  "file": "env/studio-strip.hdr",
+  "keyDirection": [
+   -0.8854,
+   0.2324,
+   -0.4025
+  ],
+  "brightestPx": [
+   138.6,
+   435.1
+  ],
+  "maxRadiance": 21.56,
+  "meanRadiance": 0.1682,
+  "exposure": 1.15,
+  "description": "Dramatic: two tall strip lights behind-left and behind-right, thin overhead strip, near-black room."
+ },
+ "daylight": {
+  "file": "env/daylight.hdr",
+  "keyDirection": [
+   -0.5992,
+   0.5527,
+   0.5792
+  ],
+  "brightestPx": [
+   1797.0,
+   320.6
+  ],
+  "maxRadiance": 15.47,
+  "meanRadiance": 1.2363,
+  "exposure": 0.85,
+  "description": "Daylight: large front-left window with mullions, warm off-white room."
+ }
+}

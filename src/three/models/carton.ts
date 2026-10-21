@@ -5,7 +5,9 @@
  * same model shows the flat sheet, the box closing, and the finished box (tuck boxes, mailers,
  * sleeves — the sleeve also carries a tray that slides out).
  */
-import { BoxGeometry, Color, Group, MeshPhysicalMaterial, MeshStandardMaterial, Object3D, Quaternion, Vector3, BackSide, FrontSide } from 'three';
+import { BoxGeometry, BufferAttribute, BufferGeometry, Color, CylinderGeometry, DoubleSide, Group, MeshPhysicalMaterial, MeshStandardMaterial, Object3D, Quaternion, Vector2, Vector3, BackSide, FrontSide } from 'three';
+import { tiledNormal } from '../assets';
+import { CatmullRomCurve3, ExtrudeGeometry, Shape, TubeGeometry } from 'three';
 import type { NetNode, P2 } from '../../products/types';
 import { mm } from '../../products/geom';
 import { boardOf } from '../../products/cartons';
@@ -21,9 +23,33 @@ const ease = (t: number) => t * t * (3 - 2 * t);
 
 const FLAP = /^(tuck|dust|ear|glue)|^lid-(l|r|tuck)$/;
 
-const COATING: Record<string, { rough: number; cc: number }> = {
-  matte: { rough: 0.62, cc: 0 }, gloss: { rough: 0.3, cc: 1 }, 'soft-touch': { rough: 0.9, cc: 0 }, uncoated: { rough: 0.85, cc: 0 },
+const COATING: Record<string, { rough: number; cc: number; fibre: number }> = {
+  matte: { rough: 0.62, cc: 0, fibre: 0.2 }, gloss: { rough: 0.34, cc: 1, fibre: 0.07 }, 'soft-touch': { rough: 0.92, cc: 0, fibre: 0.12 }, uncoated: { rough: 0.86, cc: 0, fibre: 0.32 },
 };
+
+/** The cut edge of a board panel: a band around its outline, one caliper deep. */
+function edgeBand(poly: { x: number; y: number }[], z0: number, depth: number): BufferGeometry {
+  const n = poly.length;
+  let cx = 0, cy = 0;
+  for (const p of poly) { cx += p.x; cy += -p.y; }
+  cx /= n; cy /= n;
+  const pos: number[] = [], nrm: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = poly[i], b = poly[(i + 1) % n];
+    const ax = a.x, ay = -a.y, bx = b.x, by = -b.y;
+    let nx = by - ay, ny = -(bx - ax);
+    const l = Math.hypot(nx, ny) || 1;
+    nx /= l; ny /= l;
+    if (nx * ((ax + bx) / 2 - cx) + ny * ((ay + by) / 2 - cy) < 0) { nx = -nx; ny = -ny; }
+    const z1 = z0 - depth;
+    pos.push(ax, ay, z0, bx, by, z0, bx, by, z1, ax, ay, z0, bx, by, z1, ax, ay, z1);
+    for (let k = 0; k < 6; k++) nrm.push(nx, ny, 0);
+  }
+  const g = new BufferGeometry();
+  g.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
+  g.setAttribute('normal', new BufferAttribute(new Float32Array(nrm), 3));
+  return g;
+}
 
 export function buildCarton(input: ModelInput): ProductModel {
   const o = input.options;
@@ -37,7 +63,15 @@ export function buildCarton(input: ModelInput): ProductModel {
   const box = bleedBox(surface);
   const outside = printMaterial({ side: FrontSide, bumpScale: 0.8 });
   const inside = new MeshStandardMaterial({ color: new Color(board.inside), roughness: 0.92, side: FrontSide });
-  bag.add(outside); bag.add(inside);
+  // Cut edges: the board's core shows (lighter fluting on corrugated, a greyish core on GC1).
+  const edgeColor = board.value === 'corrugated' ? '#cfae82' : board.value === 'gc1' ? '#bdb9b0' : new Color(board.inside).multiplyScalar(0.9).getStyle();
+  const edgeMat = new MeshStandardMaterial({ color: new Color(edgeColor), roughness: 0.95, side: DoubleSide });
+  bag.add(outside); bag.add(inside); bag.add(edgeMat);
+  // Fibre of the board under the coating.
+  const kraftLike = board.value === 'kraft' || board.value === 'corrugated';
+  outside.normalMap = bag.texture(tiledNormal(kraftLike ? 'kraft' : 'paper', box.w / mm(22), box.h / mm(22)));
+  inside.normalMap = bag.texture(tiledNormal('kraft', box.w / mm(22), box.h / mm(22)));
+  inside.normalScale = new Vector2(0.35, 0.35);
   const uv = (p: P2) => surfaceUV(box, p.x, p.y);
 
   // Build the hinge tree. Net (x, y-down) → 3D (x, −y, 0); printed side faces +z.
@@ -80,6 +114,28 @@ export function buildCarton(input: ModelInput): ProductModel {
     fm.castShadow = !tucked;
     const bm = bag.mesh(backFace, inside, pivot);
     bm.castShadow = false;
+    // The board's thickness at the cut edges (seen at grazing angles and on corrugated board).
+    const em = bag.mesh(edgeBand(local, zOff, caliper), edgeMat, pivot);
+    em.castShadow = false;
+    // A rounded crease along structural folds: a bead on the hinge line coloured by the artwork
+    // under it, so box edges catch a soft highlight instead of meeting at a knife edge.
+    if (n.hinge && !tucked && n.angle > 60 && n.angle < 120) {
+      const [a, b] = n.hinge;
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const r = Math.max(caliper * 0.9, mm(0.35));
+      const cyl = new CylinderGeometry(r, r, len, 10, 1, true);
+      const uvs = cyl.getAttribute('uv'), cp = cyl.getAttribute('position');
+      for (let i = 0; i < cp.count; i++) {
+        const t = cp.getY(i) / len + 0.5;
+        const [u, v] = uv({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+        uvs.setXY(i, u, v);
+      }
+      // Along the hinge (pivot space: x right, y up) and sunk half a caliper into the board.
+      cyl.rotateZ(-Math.atan2(b.x - a.x, -(b.y - a.y)));
+      cyl.translate((b.x - a.x) / 2, -(b.y - a.y) / 2, -caliper * 0.5);
+      const bead = bag.mesh(cyl, outside, pivot);
+      bead.castShadow = false;
+    }
     if (n.hinge) {
       const [a, b] = n.hinge;
       const axis = new Vector3(b.x - a.x, -(b.y - a.y), 0).normalize();
@@ -99,6 +155,40 @@ export function buildCarton(input: ModelInput): ProductModel {
     }
   }
   group.add(assembly);
+
+  // Paper bag handles: twisted paper rope (or flat tape) glued inside the turn-in of the front
+  // and the back, rising over the top edge.
+  if (input.template === 'paper-bag' && str(o, 'handles', 'twisted') !== 'none') {
+    const flat = str(o, 'handles') === 'flat';
+    const hm = new MeshStandardMaterial({ color: new Color(str(o, 'handleColor', '#a47b4f')), roughness: 0.88 });
+    hm.normalMap = bag.texture(tiledNormal(flat ? 'kraft' : 'canvas', flat ? 6 : 60, flat ? 1 : 2));
+    bag.add(hm);
+    for (const id of ['front', 'back']) {
+      const nd = net.find((x) => x.id === id), pv = pivots.get(id), org = origins.get(id);
+      if (!nd || !pv || !org) continue;
+      const xs = nd.poly.map((p) => p.x), ys = nd.poly.map((p) => p.y);
+      const x0 = Math.min(...xs), x1 = Math.max(...xs), top = Math.min(...ys);
+      const w = x1 - x0;
+      const xa = x0 + w * 0.3, xb = x0 + w * 0.7;
+      const rise = Math.min(mm(110), w * 0.42);
+      const zIn = -caliper * 3 - mm(2);
+      const pts: Vector3[] = [];
+      for (let i = 0; i <= 16; i++) {
+        const t = i / 16;
+        const yNet = top + mm(24) - (mm(24) + rise) * Math.pow(Math.sin(Math.PI * t), 0.8);
+        pts.push(new Vector3(xa + (xb - xa) * t - org.x, -(yNet - org.y), zIn - mm(3) * Math.sin(Math.PI * t)));
+      }
+      const curve = new CatmullRomCurve3(pts);
+      let geo;
+      if (flat) {
+        const sh = new Shape();
+        sh.moveTo(-mm(0.5), -mm(7)); sh.lineTo(mm(0.5), -mm(7)); sh.lineTo(mm(0.5), mm(7)); sh.lineTo(-mm(0.5), mm(7)); sh.closePath();
+        geo = new ExtrudeGeometry(sh, { steps: 80, extrudePath: curve, bevelEnabled: false });
+      } else geo = new TubeGeometry(curve, 80, mm(2.6), 10, false);
+      const m = bag.mesh(geo, hm, pv);
+      m.castShadow = true;
+    }
+  }
 
   // Rest orientation of the finished box.
   const tpl = input.template;
@@ -173,10 +263,12 @@ export function buildCarton(input: ModelInput): ProductModel {
     applyTextures(tex) {
       const t = tex[surface.id];
       const co = COATING[str(o, 'finish', 'matte')] ?? COATING.matte;
-      const c = compose({ art: t?.art ?? null, masks: t?.masks ?? {}, base: board.outside, roughness: board.value === 'kraft' || board.value === 'corrugated' ? 0.9 : co.rough, metalness: 0, clearcoat: co.cc, mode: 'opaque', widthPt: box.w, anisotropy: input.anisotropy, maxPx: 3072 });
+      const c = compose({ art: t?.art ?? null, masks: t?.masks ?? {}, base: board.outside, roughness: kraftLike ? 0.9 : co.rough, metalness: 0, clearcoat: co.cc, mode: 'opaque', widthPt: box.w, anisotropy: input.anisotropy });
       bag.setComposite('outside', c);
-      applyComposite(outside, c);
-      if (str(o, 'finish') === 'soft-touch') { outside.sheen = 0.4; outside.sheenRoughness = 0.8; }
+      applyComposite(outside, c, co.cc ? 0.03 : 0.06);
+      const fibre = kraftLike ? 0.45 : co.fibre;
+      outside.normalScale = new Vector2(fibre, fibre);
+      if (str(o, 'finish') === 'soft-touch') { outside.sheen = 0.45; outside.sheenRoughness = 0.85; outside.sheenColor = new Color('#ffffff'); }
     },
     dispose: () => bag.dispose(),
   };

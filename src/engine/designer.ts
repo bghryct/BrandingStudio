@@ -180,6 +180,12 @@ function side(p: DielinePanel, c: Ctx): Element[] {
       makeLogo({ name: 'Side wordmark', variant: 'wordmark', x: p.w / 2 - lw / 2, y: p.h / 2 - lh / 2, w: lw, h: lh, rotation: -90, color: c.ink, anchor: p.id }),
     ];
   }
+  // A wall that reads sideways in the flat (mailer walls), laid out in its reading frame: the
+  // wordmark runs along it.
+  if ((p.read === 90 || p.read === 270) && p.w > p.h * 1.6 && p.h >= mm(14)) {
+    const lw = p.w * 0.66, lh = Math.min(p.h * 0.42, lw * 0.3);
+    return [makeLogo({ name: 'Side wordmark', variant: 'wordmark', x: p.w / 2 - lw / 2, y: p.h / 2 - lh / 2, w: lw, h: lh, color: c.ink, anchor: p.id })];
+  }
   const m = margin(p);
   const fs = clamp(p.h * 0.12, 6, 16);
   return [txt(c.input.kit.tagline, m, p.h / 2 - fs, p.w - 2 * m, fs * 2.2, { fontFamily: c.input.kit.fonts.headline, fontSize: fs, leading: fs * 1.1, align: 'center', color: c.ink, weight: 600 }, { name: 'Tagline', anchor: p.id, autoFit: true, verticalAlign: 'middle' })];
@@ -341,8 +347,12 @@ export function designSurface(product: Product, surface: DielineSurface, input: 
       els.push(txt(input.copy.descriptor, 0, p.h * 0.62, p.w, fs * 2, { fontFamily: input.kit.fonts.body, fontSize: fs, leading: fs * 1.2, tracking: 220, align: 'center', textTransform: 'uppercase', color: ink, weight: 500 }, { name: 'Descriptor' }));
     }
   } else {
-    for (const p of surface.panels) {
+    for (const p0 of surface.panels) {
       const first = els.length;
+      // Panels that read sideways on the product (mailer walls: 90° on one side, 270° on the
+      // other) are laid out in their reading frame and turned into place afterwards.
+      const turn = p0.read === 90 || p0.read === 270 ? p0.read : 0;
+      const p: DielinePanel = turn ? { ...p0, w: p0.h, h: p0.w } : p0;
       switch (roleOf(tpl, surface, p)) {
         case 'hero': els.push(...hero(p, c)); break;
         case 'back': els.push(...back(p, c)); break;
@@ -354,8 +364,19 @@ export function designSurface(product: Product, surface: DielineSurface, input: 
         case 'message': els.push(...tagline(p, c, 'Hello, you. Thanks for wearing loud.')); break;
         default: break;
       }
+      if (turn) {
+        // Clockwise turn about the panel centre (y down); items rotate about their own centres.
+        const sin = turn === 90 ? 1 : -1;
+        for (let i = first; i < els.length; i++) {
+          const e = els[i];
+          const dx = e.x + e.w / 2 - p.w / 2, dy = e.y + e.h / 2 - p.h / 2;
+          e.x = p0.w / 2 - dy * sin - e.w / 2;
+          e.y = p0.h / 2 + dx * sin - e.h / 2;
+          e.rotation = ((((e.rotation + turn) % 360) + 540) % 360) - 180;
+        }
+      }
       // Panels that fold over (lids, mailer fronts) carry their artwork upside down in the flat.
-      if (p.read === 180) for (let i = first; i < els.length; i++) {
+      if (p0.read === 180) for (let i = first; i < els.length; i++) {
         const e = els[i];
         e.x = p.w - e.x - e.w;
         e.y = p.h - e.y - e.h;

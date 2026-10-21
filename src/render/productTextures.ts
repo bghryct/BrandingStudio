@@ -24,12 +24,29 @@ function toMask(c: HTMLCanvasElement): HTMLCanvasElement {
   return c;
 }
 
-export async function buildProductTextures(project: Project, product: Product, o: { maxPx?: number; signal?: { cancelled: boolean } } = {}): Promise<SurfaceTextures | null> {
+export interface TextureBuildOptions {
+  /** Base size: longest edge of a surface's art (px), at most 5 px per pt. */
+  maxPx?: number;
+  /** Sharpened: the density the view asks for (px per pt), within `maxEdge` and `maxPixels`. */
+  ppp?: number;
+  maxEdge?: number;
+  maxPixels?: number;
+  signal?: { cancelled: boolean };
+}
+
+/** Density a surface is rasterised at for these options (px per pt). */
+export function surfaceDensity(box: { w: number; h: number }, o: TextureBuildOptions): number {
+  const base = Math.min(5, (o.maxPx ?? 2048) / Math.max(box.w, box.h));
+  if (!o.ppp || o.ppp <= base) return base;
+  return Math.max(base, Math.min(o.ppp, (o.maxEdge ?? 8192) / Math.max(box.w, box.h), Math.sqrt((o.maxPixels ?? 16e6) / (box.w * box.h))));
+}
+
+export async function buildProductTextures(project: Project, product: Product, o: TextureBuildOptions = {}): Promise<SurfaceTextures | null> {
   const out: SurfaceTextures = {};
   for (const s of dielineOf(product).surfaces) {
     if (o.signal?.cancelled) return null;
     const box = { x: -s.bleed, y: -s.bleed, w: s.w + 2 * s.bleed, h: s.h + 2 * s.bleed };
-    const ppp = Math.min(5, (o.maxPx ?? 2048) / Math.max(box.w, box.h));
+    const ppp = surfaceDensity(box, o);
     const prims = compileSurface(project, product, s.id, { ground: true, substrate: false });
     await preloadImages(prims);
     if (o.signal?.cancelled) return null;

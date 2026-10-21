@@ -56,10 +56,15 @@ export function contextFor(project: Project, product: Product | null, surfaceId:
 
 const singleCache = new WeakMap<Element, Map<string, FrameLayout>>();
 const stylesIds = new WeakMap<object, number>();
+const NONE_PARA: NonNullable<Project['paragraphStyles']> = [];
+const NONE_CHAR: NonNullable<Project['characterStyles']> = [];
 let stylesCounter = 0;
 
 function storyStyles(project: Project): { styles: StoryStyles | null; key: string } {
-  const para = project.paragraphStyles ?? [], char = project.characterStyles ?? [];
+  // Shared empty lists: a fresh [] per call would give the cache a new identity every time, so
+  // a project with paragraph styles but no character styles (or the reverse) re-set every story
+  // on every render.
+  const para = project.paragraphStyles ?? NONE_PARA, char = project.characterStyles ?? NONE_CHAR;
   if (!para.length && !char.length) return { styles: null, key: '-' };
   const id = (o: object) => { let v = stylesIds.get(o); if (v == null) { v = ++stylesCounter; stylesIds.set(o, v); } return v; };
   for (const d of [...para, ...char]) if (d.props.fontFamily) void ensureFamily(d.props.fontFamily);

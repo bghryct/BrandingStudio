@@ -70,20 +70,34 @@ export const BOTTLES: BottleDef[] = [
 
 export const bottleDef = (o: Opts) => BOTTLES.find((b) => b.id === str(o, 'shape')) ?? BOTTLES[0];
 
-/** Smooth the profile (Catmull-Rom through the control points), returning [y, r] in pt. */
+/**
+ * Smooth the profile, returning [y, r] in pt: a monotone cubic (Fritsch–Carlson) of the radius
+ * over the height. Heights only ever increase, so the glass never folds back on itself (a
+ * Catmull-Rom through the points as 2D control points overshot in height at the heel and the
+ * shoulder: rings of doubled glass, and a heel 3–9 mm below the floor), and the radius never
+ * overshoots the control points; straight runs stay straight.
+ */
 export function sampleProfile(pts: [number, number][], per = 6): [number, number][] {
-  const out: [number, number][] = [];
   const n = pts.length;
+  if (n < 2) return pts.map(([y, r]) => [mm(y), mm(r)]);
+  const d: number[] = [];
+  for (let i = 0; i < n - 1; i++) d.push((pts[i + 1][1] - pts[i][1]) / Math.max(1e-6, pts[i + 1][0] - pts[i][0]));
+  const m: number[] = pts.map((_, i) => (i === 0 ? d[0] : i === n - 1 ? d[n - 2] : d[i - 1] * d[i] <= 0 ? 0 : (d[i - 1] + d[i]) / 2));
+  for (let i = 0; i < n - 1; i++) if (Math.abs(d[i]) < 1e-9) { m[i] = 0; m[i + 1] = 0; }
   for (let i = 0; i < n - 1; i++) {
-    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(n - 1, i + 2)];
-    const seg = Math.max(1, Math.round(per * Math.min(4, Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) / 8)));
+    if (Math.abs(d[i]) < 1e-9) continue;
+    const a = m[i] / d[i], b = m[i + 1] / d[i], s = a * a + b * b;
+    if (s > 9) { const k = 3 / Math.sqrt(s); m[i] = k * a * d[i]; m[i + 1] = k * b * d[i]; }
+  }
+  const out: [number, number][] = [];
+  for (let i = 0; i < n - 1; i++) {
+    const [y0, r0] = pts[i], [y1, r1] = pts[i + 1];
+    const h = y1 - y0;
+    const seg = Math.max(1, Math.round(per * Math.min(4, Math.hypot(h, r1 - r0) / 8)));
     for (let k = 0; k < seg; k++) {
-      const t = k / seg;
-      const t2 = t * t, t3 = t2 * t;
-      const cr = (a: number, b: number, c: number, d: number) => 0.5 * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
-      // Keep straight runs straight: if p1–p2 is a vertical (constant r) segment, interpolate linearly.
-      if (Math.abs(p1[1] - p2[1]) < 0.01) out.push([mm(p1[0] + (p2[0] - p1[0]) * t), mm(p1[1])]);
-      else out.push([mm(cr(p0[0], p1[0], p2[0], p3[0])), mm(Math.max(0, cr(p0[1], p1[1], p2[1], p3[1])))]);
+      const t = k / seg, t2 = t * t, t3 = t2 * t;
+      const r = (2 * t3 - 3 * t2 + 1) * r0 + (t3 - 2 * t2 + t) * h * m[i] + (-2 * t3 + 3 * t2) * r1 + (t3 - t2) * h * m[i + 1];
+      out.push([mm(y0 + h * t), mm(Math.max(0, r))]);
     }
   }
   out.push([mm(pts[n - 1][0]), mm(pts[n - 1][1])]);
